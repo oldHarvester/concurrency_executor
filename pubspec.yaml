@@ -5,15 +5,17 @@ homepage:
 publish_to: none
 
 environment:
-  sdk: ^3.10.0
+  sdk: ^3.0.0
   flutter: ">=1.17.0"
 
 dependencies:
+  dio: ">=5.0.0 <7.0.0"
   flutter:
     sdk: flutter
   flutter_toolkit:
     git:
       url: https://github.com/oldHarvester/flutter_toolkit.git
+  equatable: ">=2.0.0 <3.0.0"
 
 dev_dependencies:
   flutter_test:
