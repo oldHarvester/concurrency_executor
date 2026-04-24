@@ -12,7 +12,26 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      home: ExamplePage(),
+      home: Builder(
+        builder: (context) {
+          return Scaffold(
+            body: Center(
+              child: ElevatedButton(
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (context) {
+                        return ExamplePage();
+                      },
+                    ),
+                  );
+                },
+                child: Text('Open'),
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 }
@@ -40,7 +59,7 @@ class _ExamplePageState extends State<ExamplePage> {
   @override
   void dispose() {
     for (final entry in _executorMap.values) {
-      entry.cancel();
+      entry.dispose();
     }
     super.dispose();
   }
@@ -54,6 +73,16 @@ class _ExamplePageState extends State<ExamplePage> {
       style: TextStyle(
         fontWeight: FontWeight.w600,
       ),
+    );
+  }
+
+  Widget buildButton({
+    required String title,
+    VoidCallback? onPressed,
+  }) {
+    return ElevatedButton(
+      onPressed: onPressed,
+      child: Text(title),
     );
   }
 
@@ -96,16 +125,13 @@ class _ExamplePageState extends State<ExamplePage> {
             final logger = CustomLogger(owner: strategy.name);
             void execute() async {
               executor.execute(
-                (cancelToken) async {
-                  await Future.delayed(Duration(seconds: 2));
+                (handler) async {
+                  await Future.delayed(Duration(seconds: 3));
                 },
                 onStart: (id) {
                   logger.log('start $id');
                 },
-                onSkip: (result) {
-                  logger.log('skip: ${result.id}');
-                },
-                onCancel: (result) {
+                onCancelled: (result) {
                   logger.log('cancelled: ${result.id}');
                 },
                 onSuccess: (result) {
@@ -124,19 +150,32 @@ class _ExamplePageState extends State<ExamplePage> {
                   buildStrategyTitle(strategy),
                   buildStrategyDescription(strategy),
                   Expanded(
-                    child: Center(
-                      child: ElevatedButton(
-                        onPressed: () {
-                          execute();
-                          Future.delayed(
-                            Duration(seconds: 1),
-                            () {
-                              execute();
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Flexible(
+                          child: buildButton(
+                            title: 'Try out',
+                            onPressed: () {
+                              for (var i = 0; i < 3; i++) {
+                                Future.delayed(
+                                  Duration(seconds: i),
+                                  execute,
+                                );
+                              }
                             },
-                          );
-                        },
-                        child: Text('Try out'),
-                      ),
+                          ),
+                        ),
+                        Flexible(
+                          child: buildButton(
+                            title: 'Cancel all',
+                            onPressed: () {
+                              executor.cancelAll();
+                            },
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],

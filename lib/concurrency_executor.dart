@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:dio/dio.dart';
 import 'package:equatable/equatable.dart';
@@ -9,12 +10,15 @@ enum ConcurrencyExecutorStrategy {
   /// Используется когда важен только последний результат (например, поиск по вводу)
   switchMap,
 
-  /// Игнорирует новые запросы пока выполняется текущий.
-  /// Используется когда нельзя дублировать запрос (например, кнопка оплаты)
+  /// Игнорирует новые вызовы пока выполняется текущий того же типа.
+  /// Новый вызов получает Future уже выполняющейся операции.
+  /// Используется для защиты от дублирующих действий
+  /// (двойной тап по кнопке оплаты, повторная отправка формы).
   exhaustMap,
 
-  /// Выполняет все запросы параллельно, не отменяя предыдущие.
-  /// Используется когда все результаты важны
+  /// Присоединяется к пулу отменяемых задач.
+  /// Используется когда все результаты важны.
+  /// При отмене все задачи которые были запущены вернут `ConcurrencyExecutorCancelledResult`
   mergeMap,
 
   /// Выполняет запросы по очереди, ждёт завершения предыдущего.
@@ -23,7 +27,7 @@ enum ConcurrencyExecutorStrategy {
 }
 
 typedef ConcurrencyExecutorHandler<T> = Future<T> Function(
-  CancelToken cancelToken,
+  ConcurrencyExecutorItem handler,
 );
 
 sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
@@ -31,17 +35,31 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
 
   final int id;
 
-  const factory ConcurrencyExecutorResult.skip(int id) =
-      ConcurrencyExecutorSkipResult;
-
   const factory ConcurrencyExecutorResult.cancelled(
-      int id, OperationResult<T> result) = ConcurrencyExecutorCancelledResult;
+    int id, [
+    OperationResult<T>? result,
+  ]) = ConcurrencyExecutorCancelledResult;
 
   const factory ConcurrencyExecutorResult.success(
-      int id, OperationResult<T> result) = ConcurrencyExecutorSuccessResult;
+    int id,
+    OperationResult<T> result,
+  ) = ConcurrencyExecutorSuccessResult;
+
+  bool get isCancelled {
+    return map(
+          onCancelled: (result) => true,
+        ) ??
+        false;
+  }
+
+  bool get isSuccess {
+    return map(
+          onSuccess: (result) => true,
+        ) ??
+        false;
+  }
 
   WhenValue when<WhenValue>({
-    required WhenValue Function(ConcurrencyExecutorSkipResult<T> result) onSkip,
     required WhenValue Function(ConcurrencyExecutorSuccessResult<T> result)
         onSuccess,
     required WhenValue Function(ConcurrencyExecutorCancelledResult<T> result)
@@ -49,20 +67,17 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
   }) {
     final result = this;
     return switch (result) {
-      ConcurrencyExecutorSkipResult<T> _ => onSkip(result),
       ConcurrencyExecutorCancelledResult<T> _ => onCancelled(result),
       ConcurrencyExecutorSuccessResult<T> _ => onSuccess(result),
     };
   }
 
   MapValue? map<MapValue>({
-    MapValue? Function(ConcurrencyExecutorSkipResult<T> result)? onSkip,
     MapValue? Function(ConcurrencyExecutorSuccessResult<T> result)? onSuccess,
     MapValue? Function(ConcurrencyExecutorCancelledResult<T> result)?
         onCancelled,
   }) {
     return when(
-      onSkip: (result) => onSkip?.call(result),
       onSuccess: (result) => onSuccess?.call(result),
       onCancelled: (result) => onCancelled?.call(result),
     );
@@ -72,20 +87,14 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
   List<Object?> get props => [id];
 }
 
-class ConcurrencyExecutorSkipResult<T> extends ConcurrencyExecutorResult<T> {
-  const ConcurrencyExecutorSkipResult(super.id);
-
-  @override
-  List<Object?> get props => [...super.props];
-}
-
 class ConcurrencyExecutorCancelledResult<T>
     extends ConcurrencyExecutorResult<T> {
-  const ConcurrencyExecutorCancelledResult(super.id, this.result);
-  final OperationResult<T> result;
+  const ConcurrencyExecutorCancelledResult(super.id, [this.result]);
+
+  final OperationResult<T>? result;
 
   @override
-  List<Object?> get props => [result];
+  List<Object?> get props => [...super.props, result];
 }
 
 class ConcurrencyExecutorSuccessResult<T> extends ConcurrencyExecutorResult<T> {
@@ -94,103 +103,194 @@ class ConcurrencyExecutorSuccessResult<T> extends ConcurrencyExecutorResult<T> {
   final OperationResult<T> result;
 
   @override
-  List<Object?> get props => [result];
+  List<Object?> get props => [...super.props, result];
+}
+
+class ConcurrencyExecutorItem<T> {
+  ConcurrencyExecutorItem({
+    required this.id,
+    void Function()? onDone,
+    void Function()? onStart,
+    required ConcurrencyExecutorHandler<T> handler,
+    CancelToken? cancelToken,
+  })  : _onDone = onDone,
+        _onStart = onStart,
+        _handler = handler {
+    this.cancelToken = cancelToken ?? CancelToken();
+    if (this.cancelToken.isCancelled) {
+      cancel();
+    }
+  }
+
+  final int id;
+  final void Function()? _onDone;
+  final void Function()? _onStart;
+  final FlexibleCompleter<ConcurrencyExecutorResult<T>> _completer =
+      FlexibleCompleter();
+  late final CancelToken cancelToken;
+  final ConcurrencyExecutorHandler<T> _handler;
+  bool _started = false;
+
+  bool get isCompleted => _completer.isCompleted;
+
+  bool get isProcessing => _started && !isCompleted;
+
+  bool get inQueue => !isCompleted && !_started;
+
+  bool get isCancelled {
+    final value = _completer.value;
+    if (value == null) {
+      return false;
+    }
+    return value.isCancelled;
+  }
+
+  Future<ConcurrencyExecutorResult<T>> get future => _completer.future;
+
+  Future<void> _start() async {
+    if (isCompleted || _started) return;
+    _started = true;
+    _onStart?.call();
+    final result = await _handler(this).safeExecute();
+    if (!isCompleted) {
+      _completer.complete(
+        ConcurrencyExecutorResult.success(id, result),
+      );
+      _onDone?.call();
+    }
+  }
+
+  void cancel() {
+    if (isCompleted || isCancelled) return;
+    if (!cancelToken.isCancelled) {
+      cancelToken.cancel();
+    }
+    _completer.complete(
+      ConcurrencyExecutorResult.cancelled(id),
+    );
+    _onDone?.call();
+  }
 }
 
 class ConcurrencyExecutor<T> {
   ConcurrencyExecutor({
     this.strategy = ConcurrencyExecutorStrategy.switchMap,
+    this.mergeCalls = false,
   });
 
   final IntGenerator _idGenerator = IntGenerator();
+
+  /// Если этот параметр включен,
+  /// несколько вызывов будут получать один результат
+  /// если это возможно
+  final bool mergeCalls;
   final ConcurrencyExecutorStrategy strategy;
-  FlexibleCompleter<ConcurrencyExecutorResult<T>>? _completer;
-  CancelToken? _cancelToken;
+  final SplayTreeMap<int, ConcurrencyExecutorItem<T>> _executorMap =
+      SplayTreeMap();
+  bool _disposed = false;
 
-  bool get isCancelled {
-    final completer = _completer;
-    final token = _cancelToken;
-    return (completer != null && completer.isCancelled) ||
-        (token != null && token.isCancelled);
+  bool get isProcessing {
+    return _executorMap.isNotEmpty;
   }
 
-  bool get isRunning {
-    return !isIdle && !isCompleted;
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    cancelAll();
   }
 
-  bool get isCompleted {
-    final completer = _completer;
-    return (completer != null && completer.isCompleted) || isCancelled;
+  void cancelAll() {
+    return _cancel();
   }
 
-  bool get isIdle => _cancelToken == null && _completer == null;
+  void cancelById(int id) {
+    return _cancel(id: id);
+  }
 
-  void cancel() {
-    // _completer?.complete(ConcurrencyExecutorCancelledResult(id, result));
-    _completer?.cancel();
-    final token = _cancelToken;
-    if (token != null && !token.isCancelled) {
-      token.cancel();
+  void _cancel({int? id}) {
+    if (id != null) {
+      final item = _executorMap.remove(id);
+      item?.cancel();
+    } else {
+      while (_executorMap.isNotEmpty) {
+        final item = _executorMap.remove(_executorMap.entries.first.key)!;
+        item.cancel();
+      }
+    }
+  }
+
+  ConcurrencyExecutorItem<T>? findExecutorById(int id) {
+    return _executorMap[id];
+  }
+
+  void _onExecutorDone(int id) {
+    _executorMap.remove(id);
+    if (_executorMap.isNotEmpty) {
+      final next = _executorMap.entries.first.value;
+      if (next.inQueue && strategy == ConcurrencyExecutorStrategy.concatMap) {
+        next._start();
+      }
     }
   }
 
   Future<ConcurrencyExecutorResult<T>> execute(
     ConcurrencyExecutorHandler<T> handler, {
-    ConcurrencyExecutorStrategy? strategy,
     void Function(int id)? onStart,
     void Function(ConcurrencyExecutorSuccessResult<T> result)? onSuccess,
-    void Function(ConcurrencyExecutorSkipResult<T> result)? onSkip,
-    void Function(ConcurrencyExecutorCancelledResult<T> result)? onCancel,
+    void Function(ConcurrencyExecutorCancelledResult<T> result)? onCancelled,
   }) async {
-    final id = _idGenerator.generate();
-    final resultStrategy = strategy ?? this.strategy;
-    switch (resultStrategy) {
+    var needCancel = _disposed;
+    switch (strategy) {
       case ConcurrencyExecutorStrategy.concatMap:
-        while (isRunning) {
-          await _completer?.future;
-        }
-
-        /// TODO: нужно сделать так чтобы `ConcurrencyExecutorResult<T>`
-        /// всегда возвращался но в очереди
-
+      case ConcurrencyExecutorStrategy.mergeMap:
         break;
       case ConcurrencyExecutorStrategy.exhaustMap:
-        final completer = _completer;
-        if (completer != null && !isCompleted) {
-          return completer.future;
+        final executor = _executorMap.entries.firstOrNull?.value;
+        if (executor != null) {
+          if (mergeCalls) {
+            return executor.future;
+          } else {
+            needCancel = true;
+          }
         }
         break;
-      case ConcurrencyExecutorStrategy.mergeMap:
-        // Nothing need to do
-        break;
       case ConcurrencyExecutorStrategy.switchMap:
-        cancel();
+        if (mergeCalls) {
+          // TODO:
+        } else {
+          cancelAll();
+        }
         break;
     }
 
-    final completer = FlexibleCompleter<ConcurrencyExecutorResult<T>>();
-    final cancelToken = CancelToken();
-    _completer = completer;
-    _cancelToken = cancelToken;
-
-    bool isSync() {
-      final allowCompleter =
-          resultStrategy == ConcurrencyExecutorStrategy.mergeMap
-              ? true
-              : completer.canPerformAction(_completer);
-      return allowCompleter && !cancelToken.isCancelled;
+    final id = _idGenerator.generate();
+    final executorItem = ConcurrencyExecutorItem<T>(
+      id: id,
+      handler: handler,
+      onStart: () => onStart?.call(id),
+      onDone: () => _onExecutorDone(id),
+    );
+    if (needCancel) {
+      executorItem.cancel();
+    } else {
+      if (strategy == ConcurrencyExecutorStrategy.concatMap) {
+        if (!isProcessing) {
+          executorItem._start();
+        }
+      } else {
+        executorItem._start();
+      }
+      _executorMap[id] = executorItem;
     }
 
-    onStart?.call(id);
-    final result = await handler(cancelToken).safeExecute();
-    final concurrencyResult = isSync()
-        ? ConcurrencyExecutorResult.success(id, result)
-        : ConcurrencyExecutorResult.cancelled(id, result);
-    completer.complete(concurrencyResult);
-    concurrencyResult.map(
-      onSuccess: onSuccess,
-      onCancelled: onCancel,
-    );
-    return concurrencyResult;
+    return executorItem.future
+      ..then(
+        (value) {
+          value.map(
+            onSuccess: onSuccess,
+            onCancelled: onCancelled,
+          );
+        },
+      );
   }
 }
