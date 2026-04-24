@@ -6,23 +6,61 @@ import 'package:equatable/equatable.dart';
 import 'package:flutter_toolkit/flutter_toolkit.dart';
 
 enum ConcurrencyExecutorStrategy {
-  /// Отменяет предыдущий запрос и запускает новый.
-  /// Используется когда важен только последний результат (например, поиск по вводу)
+  /// Отменяет предыдущие вызовы и запускает новый.
+  /// Актуален только последний результат — типичные кейсы:
+  /// поиск по вводу, фильтры, автокомплит.
+  ///
+  /// С mergeCalls=true предыдущие вызывающие не получают cancelled,
+  /// а дожидаются результата последнего handler'а — удобно, когда
+  /// UI слушает только свой вызов, но должен отобразить актуальные
+  /// данные. HTTP-запросы предыдущих при этом всё равно отменяются
+  /// через CancelToken.
+  ///
+  /// С mergeCalls=false предыдущие получают cancelled сразу.
   switchMap,
 
-  /// Игнорирует новые вызовы пока выполняется текущий того же типа.
-  /// Новый вызов получает Future уже выполняющейся операции.
-  /// Используется для защиты от дублирующих действий
-  /// (двойной тап по кнопке оплаты, повторная отправка формы).
+  /// Дедуплицирует одновременные вызовы: пока операция выполняется,
+  /// повторные вызовы не запускают новый handler.
+  /// Типичные кейсы: кнопка оплаты, отправка формы, защита от
+  /// rapid-клика пользователя.
+  ///
+  /// С mergeCalls=true повторный вызов получает Future текущей
+  /// операции — оба вызывающих получат один и тот же результат
+  /// (включая callbacks onSuccess/onCancelled).
+  ///
+  /// С mergeCalls=false повторный вызов сразу получает cancelled,
+  /// текущая операция продолжает выполняться без изменений.
+  ///
+  /// Важно: executor дженерик по T, поэтому дедупликация идёт
+  /// по самому факту активной операции, а не по аргументам handler.
+  /// Вызовы execute(() => pay(100)) и execute(() => pay(200))
+  /// будут считаться одинаковыми — второй получит результат первого
+  /// (или cancelled при mergeCalls=false).
   exhaustMap,
 
-  /// Присоединяется к пулу отменяемых задач.
-  /// Используется когда все результаты важны.
-  /// При отмене все задачи которые были запущены вернут `ConcurrencyExecutorCancelledResult`
+  /// Запускает все вызовы параллельно и удерживает их в общем пуле.
+  /// Значение — не в параллельности как таковой (её даёт сам Dart),
+  /// а в групповом управлении жизненным циклом:
+  /// cancelAll() и dispose() отменяют все активные операции разом,
+  /// обрывая их HTTP-запросы через CancelToken.
+  ///
+  /// Типичный кейс: набор независимых загрузок в рамках одного экрана
+  /// или BLoC (профиль + лента + уведомления). При уходе с экрана
+  /// один вызов dispose() завершает всё.
+  ///
+  /// Флаг mergeCalls на эту стратегию не влияет.
   mergeMap,
 
-  /// Выполняет запросы по очереди, ждёт завершения предыдущего.
-  /// Используется когда важен порядок выполнения
+  /// Выполняет вызовы строго по очереди — каждый следующий стартует
+  /// только после завершения (или отмены) предыдущего.
+  /// Типичные кейсы: последовательная запись в файл/БД, операции,
+  /// где важен порядок применения.
+  ///
+  /// Новые вызовы во время активной операции встают в очередь
+  /// (состояние inQueue у item). При cancelAll() очередь тоже
+  /// очищается — все ожидающие получают cancelled.
+  ///
+  /// Флаг mergeCalls на эту стратегию не влияет.
   concatMap,
 }
 
@@ -109,7 +147,7 @@ class ConcurrencyExecutorSuccessResult<T> extends ConcurrencyExecutorResult<T> {
 class ConcurrencyExecutorItem<T> {
   ConcurrencyExecutorItem({
     required this.id,
-    void Function()? onDone,
+    void Function(ConcurrencyExecutorItem<T> executor)? onDone,
     void Function()? onStart,
     required ConcurrencyExecutorHandler<T> handler,
     CancelToken? cancelToken,
@@ -123,13 +161,14 @@ class ConcurrencyExecutorItem<T> {
   }
 
   final int id;
-  final void Function()? _onDone;
+  final void Function(ConcurrencyExecutorItem<T> executor)? _onDone;
   final void Function()? _onStart;
   final FlexibleCompleter<ConcurrencyExecutorResult<T>> _completer =
       FlexibleCompleter();
   late final CancelToken cancelToken;
   final ConcurrencyExecutorHandler<T> _handler;
   bool _started = false;
+  bool _valueWillReplaced = false;
 
   bool get isCompleted => _completer.isCompleted;
 
@@ -145,18 +184,31 @@ class ConcurrencyExecutorItem<T> {
     return value.isCancelled;
   }
 
+  void _willReplace() {
+    _valueWillReplaced = true;
+    cancelToken.cancel();
+  }
+
   Future<ConcurrencyExecutorResult<T>> get future => _completer.future;
+
+  ConcurrencyExecutorResult<T>? get result => _completer.value;
+
+  void _complete(OperationResult<T> result) {
+    if (!isCompleted) {
+      _completer.complete(
+        ConcurrencyExecutorResult.success(id, result),
+      );
+      _onDone?.call(this);
+    }
+  }
 
   Future<void> _start() async {
     if (isCompleted || _started) return;
     _started = true;
     _onStart?.call();
     final result = await _handler(this).safeExecute();
-    if (!isCompleted) {
-      _completer.complete(
-        ConcurrencyExecutorResult.success(id, result),
-      );
-      _onDone?.call();
+    if (!_valueWillReplaced) {
+      _complete(result);
     }
   }
 
@@ -168,23 +220,63 @@ class ConcurrencyExecutorItem<T> {
     _completer.complete(
       ConcurrencyExecutorResult.cancelled(id),
     );
-    _onDone?.call();
+    _onDone?.call(this);
   }
 }
 
+/// Оркестратор конкурентных async-операций с гибкими стратегиями
+/// и интеграцией с [CancelToken] из Dio.
+///
+/// Пример (поиск):
+/// ```dart
+/// final executor = ConcurrencyExecutor<List<User>>(
+///   strategy: ConcurrencyExecutorStrategy.switchMap,
+/// );
+///
+/// Future<void> onSearchChanged(String query) async {
+///   final result = await executor.execute(
+///     (item) => api.searchUsers(query, cancelToken: item.cancelToken),
+///   );
+///   result.when(
+///     onSuccess: (r) => emit(state.copyWith(users: r.result)),
+///     onCancelled: (_) {}, // устарел — игнорируем
+///   );
+/// }
+///
+/// @override
+/// void close() {
+///   executor.dispose();
+///   super.close();
+/// }
+/// ```
 class ConcurrencyExecutor<T> {
   ConcurrencyExecutor({
     this.strategy = ConcurrencyExecutorStrategy.switchMap,
-    this.mergeCalls = false,
+    this.mergeCalls = true,
   });
 
-  final IntGenerator _idGenerator = IntGenerator();
-
-  /// Если этот параметр включен,
-  /// несколько вызывов будут получать один результат
-  /// если это возможно
+  /// Управляет поведением при конкурирующих вызовах.
+  ///
+  /// Влияет только на стратегии [switchMap] и [exhaustMap] —
+  /// [mergeMap] и [concatMap] это поле игнорируют.
+  ///
+  /// - [switchMap] + mergeCalls=true: предыдущие вызовы дожидаются
+  ///   результата последнего handler'а и получают его же
+  ///   (успех → success, отмена → cancelled). Отменённый токен
+  ///   предыдущих позволяет Dio прервать их HTTP-запросы, но
+  ///   вызывающие не видят cancelled — они видят актуальный результат.
+  ///
+  /// - [switchMap] + mergeCalls=false: предыдущие вызовы сразу
+  ///   получают cancelled, новый запускается независимо.
+  ///
+  /// - [exhaustMap] + mergeCalls=true: новый вызов во время активного
+  ///   получает Future текущей операции (дедупликация).
+  ///
+  /// - [exhaustMap] + mergeCalls=false: новый вызов во время активного
+  ///   сразу получает cancelled, текущая операция продолжается.
   final bool mergeCalls;
   final ConcurrencyExecutorStrategy strategy;
+  final IntGenerator _idGenerator = IntGenerator();
   final SplayTreeMap<int, ConcurrencyExecutorItem<T>> _executorMap =
       SplayTreeMap();
   bool _disposed = false;
@@ -209,11 +301,10 @@ class ConcurrencyExecutor<T> {
 
   void _cancel({int? id}) {
     if (id != null) {
-      final item = _executorMap.remove(id);
-      item?.cancel();
+      _executorMap[id]?.cancel();
     } else {
-      while (_executorMap.isNotEmpty) {
-        final item = _executorMap.remove(_executorMap.entries.first.key)!;
+      final items = _executorMap.values.toList();
+      for (final item in items) {
         item.cancel();
       }
     }
@@ -223,12 +314,36 @@ class ConcurrencyExecutor<T> {
     return _executorMap[id];
   }
 
-  void _onExecutorDone(int id) {
+  void _onExecutorDone(ConcurrencyExecutorItem<T> executor) {
+    final id = executor.id;
     _executorMap.remove(id);
     if (_executorMap.isNotEmpty) {
-      final next = _executorMap.entries.first.value;
-      if (next.inQueue && strategy == ConcurrencyExecutorStrategy.concatMap) {
-        next._start();
+      if (strategy == ConcurrencyExecutorStrategy.concatMap) {
+        final next = _executorMap.entries.first.value;
+        if (next.inQueue) {
+          next._start();
+        }
+      } else if (strategy == ConcurrencyExecutorStrategy.switchMap) {
+        final executorResult = executor.result;
+        if (mergeCalls &&
+            !executor._valueWillReplaced &&
+            executorResult != null) {
+          while (_executorMap.isNotEmpty) {
+            final last = _executorMap.entries.last.value;
+            if (last.isCompleted) {
+              _executorMap.remove(last.id); // защита от зависания
+              continue;
+            }
+            executorResult.when(
+              onSuccess: (result) {
+                last._complete(result.result);
+              },
+              onCancelled: (result) {
+                last.cancel();
+              },
+            );
+          }
+        }
       }
     }
   }
@@ -248,7 +363,13 @@ class ConcurrencyExecutor<T> {
         final executor = _executorMap.entries.firstOrNull?.value;
         if (executor != null) {
           if (mergeCalls) {
-            return executor.future;
+            final future = executor.future;
+            future.then(
+              (value) {
+                value.map(onSuccess: onSuccess, onCancelled: onCancelled);
+              },
+            );
+            return future;
           } else {
             needCancel = true;
           }
@@ -256,7 +377,9 @@ class ConcurrencyExecutor<T> {
         break;
       case ConcurrencyExecutorStrategy.switchMap:
         if (mergeCalls) {
-          // TODO:
+          for (final entry in _executorMap.entries) {
+            entry.value._willReplace();
+          }
         } else {
           cancelAll();
         }
@@ -268,7 +391,7 @@ class ConcurrencyExecutor<T> {
       id: id,
       handler: handler,
       onStart: () => onStart?.call(id),
-      onDone: () => _onExecutorDone(id),
+      onDone: (executorItem) => _onExecutorDone(executorItem),
     );
     if (needCancel) {
       executorItem.cancel();

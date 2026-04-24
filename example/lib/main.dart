@@ -44,23 +44,35 @@ class ExamplePage extends StatefulWidget {
 }
 
 class _ExamplePageState extends State<ExamplePage> {
-  final Map<ConcurrencyExecutorStrategy, ConcurrencyExecutor> _executorMap =
+  bool _mergeCalls = false;
+
+  late Map<ConcurrencyExecutorStrategy, ConcurrencyExecutor> _executorMap =
+      _buildMap();
+
+  Map<ConcurrencyExecutorStrategy, ConcurrencyExecutor> _buildMap() =>
       Map.fromEntries(
         ConcurrencyExecutorStrategy.values.map(
           (strategy) {
             return MapEntry(
               strategy,
-              ConcurrencyExecutor(strategy: strategy),
+              ConcurrencyExecutor(
+                strategy: strategy,
+                mergeCalls: _mergeCalls,
+              ),
             );
           },
         ),
       );
 
-  @override
-  void dispose() {
+  void _disposeExecutors() {
     for (final entry in _executorMap.values) {
       entry.dispose();
     }
+  }
+
+  @override
+  void dispose() {
+    _disposeExecutors();
     super.dispose();
   }
 
@@ -110,79 +122,94 @@ class _ExamplePageState extends State<ExamplePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(
-        child: GridView.builder(
-          physics: NeverScrollableScrollPhysics(),
-          shrinkWrap: true,
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 2,
-          ),
-          itemCount: _executorMap.length,
-          itemBuilder: (context, index) {
-            final executorEntry = _executorMap.entries.elementAt(index);
-            final executor = executorEntry.value;
-            final strategy = executor.strategy;
-            final logger = CustomLogger(owner: strategy.name);
-            void execute() async {
-              executor.execute(
-                (handler) async {
-                  await Future.delayed(Duration(seconds: 3));
-                },
-                onStart: (id) {
-                  logger.log('start $id');
-                },
-                onCancelled: (result) {
-                  logger.log('cancelled: ${result.id}');
-                },
-                onSuccess: (result) {
-                  logger.log('success: ${result.id}');
+      body: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Switch(
+            value: _mergeCalls,
+            onChanged: (value) {
+              setState(
+                () {
+                  _mergeCalls = value;
+                  _disposeExecutors();
+                  _executorMap = _buildMap();
                 },
               );
-            }
+            },
+          ),
+          GridView.builder(
+            physics: NeverScrollableScrollPhysics(),
+            shrinkWrap: true,
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+            ),
+            itemCount: _executorMap.length,
+            itemBuilder: (context, index) {
+              final executorEntry = _executorMap.entries.elementAt(index);
+              final executor = executorEntry.value;
+              final strategy = executor.strategy;
+              final logger = CustomLogger(owner: strategy.name);
+              void execute() async {
+                executor.execute(
+                  (handler) async {
+                    await Future.delayed(Duration(seconds: 3));
+                  },
+                  onStart: (id) {
+                    logger.log('start $id');
+                  },
+                  onCancelled: (result) {
+                    logger.log('cancelled: ${result.id}');
+                  },
+                  onSuccess: (result) {
+                    logger.log('success: ${result.id}');
+                  },
+                );
+              }
 
-            return Container(
-              padding: EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                border: Border.all(),
-              ),
-              child: Column(
-                children: [
-                  buildStrategyTitle(strategy),
-                  buildStrategyDescription(strategy),
-                  Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Flexible(
-                          child: buildButton(
-                            title: 'Try out',
-                            onPressed: () {
-                              for (var i = 0; i < 3; i++) {
-                                Future.delayed(
-                                  Duration(seconds: i),
-                                  execute,
-                                );
-                              }
-                            },
+              return Container(
+                padding: EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  border: Border.all(),
+                ),
+                child: Column(
+                  children: [
+                    buildStrategyTitle(strategy),
+                    buildStrategyDescription(strategy),
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: buildButton(
+                              title: 'Try out',
+                              onPressed: () {
+                                for (var i = 0; i < 3; i++) {
+                                  Future.delayed(
+                                    Duration(seconds: i),
+                                    execute,
+                                  );
+                                }
+                              },
+                            ),
                           ),
-                        ),
-                        Flexible(
-                          child: buildButton(
-                            title: 'Cancel all',
-                            onPressed: () {
-                              executor.cancelAll();
-                            },
+                          Flexible(
+                            child: buildButton(
+                              title: 'Cancel all',
+                              onPressed: () {
+                                executor.cancelAll();
+                              },
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            );
-          },
-        ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ],
       ),
     );
   }
