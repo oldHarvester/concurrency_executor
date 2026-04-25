@@ -417,10 +417,7 @@ class ConcurrencyExecutor<T> {
     }
     final skipConcat =
         strategy == ConcurrencyExecutorStrategy.concatMap && isProcessing;
-    final skipExhaust = strategy == ConcurrencyExecutorStrategy.exhaustMap &&
-        isProcessing &&
-        shareWithOvertaken;
-    final skip = skipConcat || skipExhaust;
+    final skip = skipConcat;
     final autoStart = !skip;
     if (needCancel) {
       executorItem.cancel();
