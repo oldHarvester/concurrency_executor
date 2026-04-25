@@ -44,7 +44,7 @@ class ExamplePage extends StatefulWidget {
 }
 
 class _ExamplePageState extends State<ExamplePage> {
-  bool _mergeCalls = false;
+  bool _shareWithOvertaken = false;
 
   late Map<ConcurrencyExecutorStrategy, ConcurrencyExecutor> _executorMap =
       _buildMap();
@@ -57,7 +57,7 @@ class _ExamplePageState extends State<ExamplePage> {
               strategy,
               ConcurrencyExecutor(
                 strategy: strategy,
-                mergeCalls: _mergeCalls,
+                shareWithOvertaken: _shareWithOvertaken,
               ),
             );
           },
@@ -126,11 +126,11 @@ class _ExamplePageState extends State<ExamplePage> {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Switch(
-            value: _mergeCalls,
+            value: _shareWithOvertaken,
             onChanged: (value) {
               setState(
                 () {
-                  _mergeCalls = value;
+                  _shareWithOvertaken = value;
                   _disposeExecutors();
                   _executorMap = _buildMap();
                 },

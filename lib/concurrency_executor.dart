@@ -24,13 +24,13 @@ enum ConcurrencyExecutorStrategy {
   /// Актуален только последний результат — типичные кейсы:
   /// поиск по вводу, фильтры, автокомплит.
   ///
-  /// С mergeCalls=true предыдущие вызывающие не получают cancelled,
+  /// С shareWithOvertaken=true предыдущие вызывающие не получают cancelled,
   /// а дожидаются результата последнего handler'а — удобно, когда
   /// UI слушает только свой вызов, но должен отобразить актуальные
   /// данные. HTTP-запросы предыдущих при этом всё равно отменяются
   /// через CancelToken.
   ///
-  /// С mergeCalls=false предыдущие получают cancelled сразу.
+  /// С shareWithOvertaken=false предыдущие получают cancelled сразу.
   switchMap,
 
   /// Дедуплицирует одновременные вызовы: пока операция выполняется,
@@ -38,18 +38,18 @@ enum ConcurrencyExecutorStrategy {
   /// Типичные кейсы: кнопка оплаты, отправка формы, защита от
   /// rapid-клика пользователя.
   ///
-  /// С mergeCalls=true повторный вызов получает Future текущей
+  /// С shareWithOvertaken=true повторный вызов получает Future текущей
   /// операции — оба вызывающих получат один и тот же результат
   /// (включая callbacks onSuccess/onCancelled).
   ///
-  /// С mergeCalls=false повторный вызов сразу получает cancelled,
+  /// С shareWithOvertaken=false повторный вызов сразу получает cancelled,
   /// текущая операция продолжает выполняться без изменений.
   ///
   /// Важно: executor дженерик по T, поэтому дедупликация идёт
   /// по самому факту активной операции, а не по аргументам handler.
   /// Вызовы execute(() => pay(100)) и execute(() => pay(200))
   /// будут считаться одинаковыми — второй получит результат первого
-  /// (или cancelled при mergeCalls=false).
+  /// (или cancelled при shareWithOvertaken=false).
   exhaustMap,
 
   /// Запускает все вызовы параллельно и удерживает их в общем пуле.
@@ -62,7 +62,7 @@ enum ConcurrencyExecutorStrategy {
   /// или BLoC (профиль + лента + уведомления). При уходе с экрана
   /// один вызов dispose() завершает всё.
   ///
-  /// Флаг mergeCalls на эту стратегию не влияет.
+  /// Флаг shareWithOvertaken на эту стратегию не влияет.
   mergeMap,
 
   /// Выполняет вызовы строго по очереди — каждый следующий стартует
@@ -74,7 +74,7 @@ enum ConcurrencyExecutorStrategy {
   /// (состояние inQueue у item). При cancelAll() очередь тоже
   /// очищается — все ожидающие получают cancelled.
   ///
-  /// Флаг mergeCalls на эту стратегию не влияет.
+  /// Флаг shareWithOvertaken на эту стратегию не влияет.
   concatMap,
 }
 
@@ -273,7 +273,7 @@ class ConcurrencyExecutorItem<T> {
 class ConcurrencyExecutor<T> {
   ConcurrencyExecutor({
     this.strategy = ConcurrencyExecutorStrategy.switchMap,
-    this.mergeCalls = true,
+    this.shareWithOvertaken = true,
   });
 
   /// Управляет поведением при конкурирующих вызовах.
@@ -281,21 +281,21 @@ class ConcurrencyExecutor<T> {
   /// Влияет только на стратегии [switchMap] и [exhaustMap] —
   /// [mergeMap] и [concatMap] это поле игнорируют.
   ///
-  /// - [switchMap] + mergeCalls=true: предыдущие вызовы дожидаются
+  /// - [switchMap] + shareWithOvertaken=true: предыдущие вызовы дожидаются
   ///   результата последнего handler'а и получают его же
   ///   (успех → success, отмена → cancelled). Отменённый токен
   ///   предыдущих позволяет Dio прервать их HTTP-запросы, но
   ///   вызывающие не видят cancelled — они видят актуальный результат.
   ///
-  /// - [switchMap] + mergeCalls=false: предыдущие вызовы сразу
+  /// - [switchMap] + shareWithOvertaken=false: предыдущие вызовы сразу
   ///   получают cancelled, новый запускается независимо.
   ///
-  /// - [exhaustMap] + mergeCalls=true: новый вызов во время активного
+  /// - [exhaustMap] + shareWithOvertaken=true: новый вызов во время активного
   ///   получает Future текущей операции (дедупликация).
   ///
-  /// - [exhaustMap] + mergeCalls=false: новый вызов во время активного
+  /// - [exhaustMap] + shareWithOvertaken=false: новый вызов во время активного
   ///   сразу получает cancelled, текущая операция продолжается.
-  final bool mergeCalls;
+  final bool shareWithOvertaken;
   final ConcurrencyExecutorStrategy strategy;
   final IntGenerator _idGenerator = IntGenerator();
   final SplayTreeMap<int, ConcurrencyExecutorItem<T>> _executorMap =
@@ -348,7 +348,7 @@ class ConcurrencyExecutor<T> {
             ConcurrencyExecutorStrategy.exhaustMap,
             ConcurrencyExecutorStrategy.switchMap
           ].contains(strategy) &&
-          mergeCalls &&
+          shareWithOvertaken &&
           !executor.awaitingReplacement) {
         final result = executor.result;
         if (result != null) {
@@ -384,7 +384,7 @@ class ConcurrencyExecutor<T> {
       case ConcurrencyExecutorStrategy.mergeMap:
         break;
       case ConcurrencyExecutorStrategy.exhaustMap:
-        if (mergeCalls) {
+        if (shareWithOvertaken) {
           if (isProcessing) {
             markAsWaiting = true;
           }
@@ -395,7 +395,7 @@ class ConcurrencyExecutor<T> {
         }
         break;
       case ConcurrencyExecutorStrategy.switchMap:
-        if (mergeCalls) {
+        if (shareWithOvertaken) {
           for (final entry in _executorMap.entries) {
             entry.value._markAsAwaitingReplacement();
           }
@@ -419,7 +419,7 @@ class ConcurrencyExecutor<T> {
         strategy == ConcurrencyExecutorStrategy.concatMap && isProcessing;
     final skipExhaust = strategy == ConcurrencyExecutorStrategy.exhaustMap &&
         isProcessing &&
-        mergeCalls;
+        shareWithOvertaken;
     final skip = skipConcat || skipExhaust;
     final autoStart = !skip;
     if (needCancel) {
