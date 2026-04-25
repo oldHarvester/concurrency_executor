@@ -5,6 +5,20 @@ import 'package:dio/dio.dart';
 import 'package:equatable/equatable.dart';
 import 'package:flutter_toolkit/flutter_toolkit.dart';
 
+extension CancelTokenX on CancelToken {
+  bool tryCancel([Object? reason]) {
+    try {
+      if (!isCancelled) {
+        cancel(reason);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+}
+
 enum ConcurrencyExecutorStrategy {
   /// Отменяет предыдущие вызовы и запускает новый.
   /// Актуален только последний результат — типичные кейсы:
@@ -168,13 +182,15 @@ class ConcurrencyExecutorItem<T> {
   late final CancelToken cancelToken;
   final ConcurrencyExecutorHandler<T> _handler;
   bool _started = false;
-  bool _valueWillReplaced = false;
+  bool _awaitingReplacement = false;
 
   bool get isCompleted => _completer.isCompleted;
 
   bool get isProcessing => _started && !isCompleted;
 
   bool get inQueue => !isCompleted && !_started;
+
+  bool get awaitingReplacement => _awaitingReplacement;
 
   bool get isCancelled {
     final value = _completer.value;
@@ -184,9 +200,9 @@ class ConcurrencyExecutorItem<T> {
     return value.isCancelled;
   }
 
-  void _willReplace() {
-    _valueWillReplaced = true;
-    cancelToken.cancel();
+  void _markAsAwaitingReplacement() {
+    _awaitingReplacement = true;
+    cancelToken.tryCancel();
   }
 
   Future<ConcurrencyExecutorResult<T>> get future => _completer.future;
@@ -207,19 +223,15 @@ class ConcurrencyExecutorItem<T> {
     _started = true;
     _onStart?.call();
     final result = await _handler(this).safeExecute();
-    if (!_valueWillReplaced) {
+    if (!_awaitingReplacement) {
       _complete(result);
     }
   }
 
   void cancel() {
     if (isCompleted || isCancelled) return;
-    if (!cancelToken.isCancelled) {
-      cancelToken.cancel();
-    }
-    _completer.complete(
-      ConcurrencyExecutorResult.cancelled(id),
-    );
+    cancelToken.tryCancel();
+    _completer.complete(ConcurrencyExecutorResult.cancelled(id));
     _onDone?.call(this);
   }
 }
@@ -326,7 +338,7 @@ class ConcurrencyExecutor<T> {
       } else if (strategy == ConcurrencyExecutorStrategy.switchMap) {
         final executorResult = executor.result;
         if (mergeCalls &&
-            !executor._valueWillReplaced &&
+            !executor.awaitingReplacement &&
             executorResult != null) {
           while (_executorMap.isNotEmpty) {
             final last = _executorMap.entries.last.value;
@@ -378,7 +390,7 @@ class ConcurrencyExecutor<T> {
       case ConcurrencyExecutorStrategy.switchMap:
         if (mergeCalls) {
           for (final entry in _executorMap.entries) {
-            entry.value._willReplace();
+            entry.value._markAsAwaitingReplacement();
           }
         } else {
           cancelAll();
@@ -393,18 +405,16 @@ class ConcurrencyExecutor<T> {
       onStart: () => onStart?.call(id),
       onDone: (executorItem) => _onExecutorDone(executorItem),
     );
+    final skip =
+        strategy == ConcurrencyExecutorStrategy.concatMap && isProcessing;
+    final autoStart = !skip;
     if (needCancel) {
       executorItem.cancel();
-    } else {
-      if (strategy == ConcurrencyExecutorStrategy.concatMap) {
-        if (!isProcessing) {
-          executorItem._start();
-        }
-      } else {
-        executorItem._start();
-      }
-      _executorMap[id] = executorItem;
+    } else if (autoStart) {
+      executorItem._start();
     }
+
+    _executorMap[id] = executorItem;
 
     return executorItem.future
       ..then(
