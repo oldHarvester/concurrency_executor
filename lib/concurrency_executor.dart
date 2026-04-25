@@ -40,7 +40,7 @@ enum ConcurrencyExecutorStrategy {
   ///
   /// С shareWithOvertaken=true повторный вызов получает Future текущей
   /// операции — оба вызывающих получат один и тот же результат
-  /// (включая callbacks onSuccess/onCancelled). Item дублирующего вызова
+  /// (включая callbacks onComplete/onCancelled). Item дублирующего вызова
   /// помечается как awaitingReplacement и его handler не запускается,
   /// но onStart всё равно срабатывает — используйте item.awaitingReplacement
   /// чтобы различать реальный старт и ожидание чужого результата.
@@ -95,10 +95,10 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
     OperationResult<T>? result,
   ]) = ConcurrencyExecutorCancelledResult;
 
-  const factory ConcurrencyExecutorResult.success(
+  const factory ConcurrencyExecutorResult.complete(
     int id,
     OperationResult<T> result,
-  ) = ConcurrencyExecutorSuccessResult;
+  ) = ConcurrencyExecutorCompleteResult;
 
   bool get isCancelled {
     return map(
@@ -107,33 +107,47 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
         false;
   }
 
-  bool get isSuccess {
+  bool get isComplete {
     return map(
-          onSuccess: (result) => true,
+          onComplete: (result) => true,
         ) ??
         false;
   }
 
   WhenValue when<WhenValue>({
-    required WhenValue Function(ConcurrencyExecutorSuccessResult<T> result)
-        onSuccess,
+    required WhenValue Function(ConcurrencyExecutorCompleteResult<T> result)
+        onComplete,
     required WhenValue Function(ConcurrencyExecutorCancelledResult<T> result)
         onCancelled,
   }) {
     final result = this;
     return switch (result) {
       ConcurrencyExecutorCancelledResult<T> _ => onCancelled(result),
-      ConcurrencyExecutorSuccessResult<T> _ => onSuccess(result),
+      ConcurrencyExecutorCompleteResult<T> _ => onComplete(result),
     };
   }
 
   MapValue? map<MapValue>({
-    MapValue? Function(ConcurrencyExecutorSuccessResult<T> result)? onSuccess,
+    MapValue? Function(ConcurrencyExecutorCompleteResult<T> result)? onComplete,
     MapValue? Function(ConcurrencyExecutorCancelledResult<T> result)?
         onCancelled,
+    MapValue? Function(int id, T result)? onSuccessResult,
+    MapValue? Function(int id, Object error, StackTrace stackTrace)?
+        onErrorResult,
   }) {
     return when(
-      onSuccess: (result) => onSuccess?.call(result),
+      onComplete: (result) {
+        final completeResultValue = onComplete?.call(result);
+        final operationResultValue = result.result.map(
+          onSuccess: (result) {
+            return onSuccessResult?.call(id, result);
+          },
+          onError: (error, stackTrace) {
+            return onErrorResult?.call(id, error, stackTrace);
+          },
+        );
+        return operationResultValue ?? completeResultValue;
+      },
       onCancelled: (result) => onCancelled?.call(result),
     );
   }
@@ -152,8 +166,9 @@ class ConcurrencyExecutorCancelledResult<T>
   List<Object?> get props => [...super.props, result];
 }
 
-class ConcurrencyExecutorSuccessResult<T> extends ConcurrencyExecutorResult<T> {
-  const ConcurrencyExecutorSuccessResult(super.id, this.result);
+class ConcurrencyExecutorCompleteResult<T>
+    extends ConcurrencyExecutorResult<T> {
+  const ConcurrencyExecutorCompleteResult(super.id, this.result);
 
   final OperationResult<T> result;
 
@@ -191,7 +206,7 @@ class ConcurrencyExecutorItem<T> {
   bool _started = false;
   bool _awaitingReplacement = false;
 
-  /// true когда item полностью завершён (success или cancelled).
+  /// true когда item полностью завершён (complete или cancelled).
   bool get isCompleted => _completer.isCompleted;
 
   /// true когда _start() был вызван и item ещё не завершён.
@@ -243,7 +258,7 @@ class ConcurrencyExecutorItem<T> {
     if (!isCompleted) {
       _awaitingReplacement = false;
       _completer.complete(
-        ConcurrencyExecutorResult.success(id, result),
+        ConcurrencyExecutorResult.complete(id, result),
       );
       _onDone?.call(this);
     }
@@ -292,7 +307,7 @@ class ConcurrencyExecutorItem<T> {
 ///     (item) => api.searchUsers(query, cancelToken: item.cancelToken),
 ///   );
 ///   result.when(
-///     onSuccess: (r) => emit(state.copyWith(users: r.result)),
+///     onComplete: (r) => emit(state.copyWith(users: r.result)),
 ///     onCancelled: (_) {}, // устарел — игнорируем
 ///   );
 /// }
@@ -318,7 +333,7 @@ class ConcurrencyExecutor<T> {
   ///
   /// - switchMap + shareWithOvertaken=true: предыдущие вызовы дожидаются
   ///   результата последнего handler'а и получают его же
-  ///   (успех → success, отмена → cancelled). Отменённый токен
+  ///   (успех → complete, отмена → cancelled). Отменённый токен
   ///   предыдущих позволяет Dio прервать их HTTP-запросы, но
   ///   вызывающие не видят cancelled — они видят актуальный результат.
   ///
@@ -396,7 +411,7 @@ class ConcurrencyExecutor<T> {
                 ? _executorMap.entries.last.value
                 : _executorMap.entries.first.value;
             result.when(
-              onSuccess: (result) {
+              onComplete: (result) {
                 item._complete(result.result);
               },
               onCancelled: (result) {
@@ -412,8 +427,10 @@ class ConcurrencyExecutor<T> {
   Future<ConcurrencyExecutorResult<T>> execute(
     ConcurrencyExecutorHandler<T> handler, {
     void Function(int id)? onStart,
-    void Function(ConcurrencyExecutorSuccessResult<T> result)? onSuccess,
+    void Function(ConcurrencyExecutorCompleteResult<T> result)? onComplete,
     void Function(ConcurrencyExecutorCancelledResult<T> result)? onCancelled,
+    void Function(int id, T result)? onSuccessResult,
+    void Function(int id, Object error, StackTrace stackTrace)? onErrorResult,
   }) async {
     var needCancel = _disposed;
     var markAsWaiting = false;
@@ -470,7 +487,9 @@ class ConcurrencyExecutor<T> {
       ..then(
         (value) {
           value.map(
-            onSuccess: onSuccess,
+            onErrorResult: onErrorResult,
+            onSuccessResult: onSuccessResult,
+            onComplete: onComplete,
             onCancelled: onCancelled,
           );
         },

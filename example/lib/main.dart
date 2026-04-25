@@ -160,8 +160,14 @@ class _ExamplePageState extends State<ExamplePage> {
                   onCancelled: (result) {
                     logger.log('cancelled: ${result.id}');
                   },
-                  onSuccess: (result) {
-                    logger.log('success: ${result.id}');
+                  onComplete: (result) {
+                    logger.log('complete: ${result.id}');
+                  },
+                  onSuccessResult: (id, result) {
+                    logger.log('success complete: $id');
+                  },
+                  onErrorResult: (id, error, stackTrace) {
+                    logger.log('error complete: $id');
                   },
                 );
               }
