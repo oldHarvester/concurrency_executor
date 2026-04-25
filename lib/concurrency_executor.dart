@@ -40,7 +40,10 @@ enum ConcurrencyExecutorStrategy {
   ///
   /// С shareWithOvertaken=true повторный вызов получает Future текущей
   /// операции — оба вызывающих получат один и тот же результат
-  /// (включая callbacks onSuccess/onCancelled).
+  /// (включая callbacks onSuccess/onCancelled). Item дублирующего вызова
+  /// помечается как awaitingReplacement и его handler не запускается,
+  /// но onStart всё равно срабатывает — используйте item.awaitingReplacement
+  /// чтобы различать реальный старт и ожидание чужого результата.
   ///
   /// С shareWithOvertaken=false повторный вызов сразу получает cancelled,
   /// текущая операция продолжает выполняться без изменений.
@@ -188,12 +191,35 @@ class ConcurrencyExecutorItem<T> {
   bool _started = false;
   bool _awaitingReplacement = false;
 
+  /// true когда item полностью завершён (success или cancelled).
   bool get isCompleted => _completer.isCompleted;
 
+  /// true когда _start() был вызван и item ещё не завершён.
+  ///
+  /// Внимание: для exhaustMap+shareWithOvertaken дублирующего вызова
+  /// возвращает true даже если handler фактически не запущен —
+  /// item ждёт результат активной операции. Чтобы различать
+  /// "handler работает" и "item ждёт чужой результат" используйте
+  /// [awaitingReplacement].
   bool get isProcessing => _started && !isCompleted;
 
+  /// true когда item ещё не стартовал (актуально для concatMap —
+  /// item стоит в очереди и ждёт завершения предыдущего).
   bool get inQueue => !isCompleted && !_started;
 
+  /// true когда item ждёт результат другой операции вместо запуска
+  /// собственного handler'а.
+  ///
+  /// Возникает в двух случаях:
+  /// - switchMap+shareWithOvertaken: предыдущий item помечается awaiting
+  ///   при появлении нового вызова и ждёт его результат
+  /// - exhaustMap+shareWithOvertaken: новый item помечается awaiting
+  ///   при наличии активной операции и ждёт её результат
+  ///
+  /// Когда item awaiting:
+  /// - его handler не вызывается
+  /// - его cancelToken отменён (чтобы прервать сетевой запрос если был)
+  /// - он остаётся в map executor'а до получения результата извне
   bool get awaitingReplacement => _awaitingReplacement;
 
   bool get isCancelled {
@@ -223,6 +249,13 @@ class ConcurrencyExecutorItem<T> {
     }
   }
 
+  /// Запускает обработку item'а.
+  ///
+  /// Для awaiting items (помечены до вызова _start) handler НЕ запускается,
+  /// но onStart callback всё равно срабатывает — это позволяет UI
+  /// показать индикатор загрузки даже для дублирующих exhaust вызовов.
+  /// Если в onStart нужно различать реальный старт от ожидания —
+  /// проверяйте item.awaitingReplacement.
   Future<void> _start() async {
     if (isCompleted || _started) return;
     _started = true;
@@ -278,24 +311,29 @@ class ConcurrencyExecutor<T> {
 
   /// Управляет поведением при конкурирующих вызовах.
   ///
-  /// Влияет только на стратегии [switchMap] и [exhaustMap] —
-  /// [mergeMap] и [concatMap] это поле игнорируют.
+  /// Влияет только на стратегии [ConcurrencyExecutorStrategy.switchMap]
+  /// и [ConcurrencyExecutorStrategy.exhaustMap] —
+  /// [ConcurrencyExecutorStrategy.mergeMap] и
+  /// [ConcurrencyExecutorStrategy.concatMap] это поле игнорируют.
   ///
-  /// - [switchMap] + shareWithOvertaken=true: предыдущие вызовы дожидаются
+  /// - switchMap + shareWithOvertaken=true: предыдущие вызовы дожидаются
   ///   результата последнего handler'а и получают его же
   ///   (успех → success, отмена → cancelled). Отменённый токен
   ///   предыдущих позволяет Dio прервать их HTTP-запросы, но
   ///   вызывающие не видят cancelled — они видят актуальный результат.
   ///
-  /// - [switchMap] + shareWithOvertaken=false: предыдущие вызовы сразу
+  /// - switchMap + shareWithOvertaken=false: предыдущие вызовы сразу
   ///   получают cancelled, новый запускается независимо.
   ///
-  /// - [exhaustMap] + shareWithOvertaken=true: новый вызов во время активного
-  ///   получает Future текущей операции (дедупликация).
+  /// - exhaustMap + shareWithOvertaken=true: новый вызов во время активного
+  ///   получает Future текущей операции (дедупликация). Item нового вызова
+  ///   помечается awaitingReplacement, его handler не запускается, но
+  ///   onStart callback всё равно срабатывает (для индикаторов загрузки).
   ///
-  /// - [exhaustMap] + shareWithOvertaken=false: новый вызов во время активного
+  /// - exhaustMap + shareWithOvertaken=false: новый вызов во время активного
   ///   сразу получает cancelled, текущая операция продолжается.
   final bool shareWithOvertaken;
+
   final ConcurrencyExecutorStrategy strategy;
   final IntGenerator _idGenerator = IntGenerator();
   final SplayTreeMap<int, ConcurrencyExecutorItem<T>> _executorMap =
