@@ -162,21 +162,25 @@ class ConcurrencyExecutorItem<T> {
   ConcurrencyExecutorItem({
     required this.id,
     void Function(ConcurrencyExecutorItem<T> executor)? onDone,
-    void Function()? onStart,
+    void Function(ConcurrencyExecutorItem<T> executor)? onStart,
     required ConcurrencyExecutorHandler<T> handler,
     CancelToken? cancelToken,
   })  : _onDone = onDone,
         _onStart = onStart,
         _handler = handler {
-    this.cancelToken = cancelToken ?? CancelToken();
-    if (this.cancelToken.isCancelled) {
-      cancel();
-    }
+    this.cancelToken = (cancelToken ?? CancelToken());
+    this.cancelToken.whenCancel.then(
+      (value) {
+        if (!awaitingReplacement) {
+          cancel();
+        }
+      },
+    );
   }
 
   final int id;
   final void Function(ConcurrencyExecutorItem<T> executor)? _onDone;
-  final void Function()? _onStart;
+  final void Function(ConcurrencyExecutorItem<T> executor)? _onStart;
   final FlexibleCompleter<ConcurrencyExecutorResult<T>> _completer =
       FlexibleCompleter();
   late final CancelToken cancelToken;
@@ -211,6 +215,7 @@ class ConcurrencyExecutorItem<T> {
 
   void _complete(OperationResult<T> result) {
     if (!isCompleted) {
+      _awaitingReplacement = false;
       _completer.complete(
         ConcurrencyExecutorResult.success(id, result),
       );
@@ -221,7 +226,8 @@ class ConcurrencyExecutorItem<T> {
   Future<void> _start() async {
     if (isCompleted || _started) return;
     _started = true;
-    _onStart?.call();
+    _onStart?.call(this);
+    if (_awaitingReplacement) return;
     final result = await _handler(this).safeExecute();
     if (!_awaitingReplacement) {
       _complete(result);
@@ -229,7 +235,10 @@ class ConcurrencyExecutorItem<T> {
   }
 
   void cancel() {
-    if (isCompleted || isCancelled) return;
+    if (isCompleted || isCancelled) {
+      return;
+    }
+    _awaitingReplacement = false;
     cancelToken.tryCancel();
     _completer.complete(ConcurrencyExecutorResult.cancelled(id));
     _onDone?.call(this);
@@ -335,23 +344,25 @@ class ConcurrencyExecutor<T> {
         if (next.inQueue) {
           next._start();
         }
-      } else if (strategy == ConcurrencyExecutorStrategy.switchMap) {
-        final executorResult = executor.result;
-        if (mergeCalls &&
-            !executor.awaitingReplacement &&
-            executorResult != null) {
+      } else if ([
+            ConcurrencyExecutorStrategy.exhaustMap,
+            ConcurrencyExecutorStrategy.switchMap
+          ].contains(strategy) &&
+          mergeCalls &&
+          !executor.awaitingReplacement) {
+        final result = executor.result;
+        if (result != null) {
           while (_executorMap.isNotEmpty) {
-            final last = _executorMap.entries.last.value;
-            if (last.isCompleted) {
-              _executorMap.remove(last.id); // защита от зависания
-              continue;
-            }
-            executorResult.when(
+            final takeLast = strategy == ConcurrencyExecutorStrategy.switchMap;
+            final item = takeLast
+                ? _executorMap.entries.last.value
+                : _executorMap.entries.first.value;
+            result.when(
               onSuccess: (result) {
-                last._complete(result.result);
+                item._complete(result.result);
               },
               onCancelled: (result) {
-                last.cancel();
+                item.cancel();
               },
             );
           }
@@ -367,22 +378,18 @@ class ConcurrencyExecutor<T> {
     void Function(ConcurrencyExecutorCancelledResult<T> result)? onCancelled,
   }) async {
     var needCancel = _disposed;
+    var markAsWaiting = false;
     switch (strategy) {
       case ConcurrencyExecutorStrategy.concatMap:
       case ConcurrencyExecutorStrategy.mergeMap:
         break;
       case ConcurrencyExecutorStrategy.exhaustMap:
-        final executor = _executorMap.entries.firstOrNull?.value;
-        if (executor != null) {
-          if (mergeCalls) {
-            final future = executor.future;
-            future.then(
-              (value) {
-                value.map(onSuccess: onSuccess, onCancelled: onCancelled);
-              },
-            );
-            return future;
-          } else {
+        if (mergeCalls) {
+          if (isProcessing) {
+            markAsWaiting = true;
+          }
+        } else {
+          if (isProcessing) {
             needCancel = true;
           }
         }
@@ -402,19 +409,27 @@ class ConcurrencyExecutor<T> {
     final executorItem = ConcurrencyExecutorItem<T>(
       id: id,
       handler: handler,
-      onStart: () => onStart?.call(id),
-      onDone: (executorItem) => _onExecutorDone(executorItem),
+      onStart: (item) => onStart?.call(id),
+      onDone: (item) => _onExecutorDone(item),
     );
-    final skip =
+    if (markAsWaiting) {
+      executorItem._markAsAwaitingReplacement();
+    }
+    final skipConcat =
         strategy == ConcurrencyExecutorStrategy.concatMap && isProcessing;
+    final skipExhaust = strategy == ConcurrencyExecutorStrategy.exhaustMap &&
+        isProcessing &&
+        mergeCalls;
+    final skip = skipConcat || skipExhaust;
     final autoStart = !skip;
     if (needCancel) {
       executorItem.cancel();
-    } else if (autoStart) {
-      executorItem._start();
+    } else {
+      if (autoStart) {
+        executorItem._start();
+      }
+      _executorMap[id] = executorItem;
     }
-
-    _executorMap[id] = executorItem;
 
     return executorItem.future
       ..then(
