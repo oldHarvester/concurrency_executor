@@ -623,8 +623,8 @@ class ConcurrencyExecutor<T> {
   ConcurrencyExecutor({
     this.strategy = ConcurrencyExecutorStrategy.switchMap,
     this.shareWithOvertaken = true,
-    this.callbacks = const ConcurrencyExecutorCallbacks(),
-  });
+    ConcurrencyExecutorCallbacks<T>? callbacks,
+  }) : callbacks = callbacks ?? ConcurrencyExecutorCallbacks<T>();
 
   /// Управляет поведением при конкурирующих вызовах.
   ///
@@ -784,9 +784,9 @@ class ConcurrencyExecutor<T> {
   /// фильтрации shared-результатов.
   Future<ConcurrencyExecutorResult<T>> execute(
     ConcurrencyExecutorHandler<T> handler, {
-    ConcurrencyExecutorCallbacks<T> callbacks =
-        const ConcurrencyExecutorCallbacks(),
+    ConcurrencyExecutorCallbacks<T>? callbacks,
   }) async {
+    final localCallbacks = callbacks ?? ConcurrencyExecutorCallbacks<T>();
     var needCancel = _disposed;
     var markAsWaiting = false;
     switch (strategy) {
@@ -835,7 +835,7 @@ class ConcurrencyExecutor<T> {
         // Каждый _notifyStart применяет фильтр notifyOnSharedResult
         // к своему уровню колбэков.
         this.callbacks._notifyStart(item);
-        callbacks._notifyStart(item);
+        localCallbacks._notifyStart(item);
       },
       onDone: (item) => _onExecutorDone(item),
     );
@@ -864,7 +864,7 @@ class ConcurrencyExecutor<T> {
     future.then(
       (result) {
         this.callbacks._notifyResult(result: result, item: executorItem);
-        callbacks._notifyResult(result: result, item: executorItem);
+        localCallbacks._notifyResult(result: result, item: executorItem);
       },
     );
     return future;
