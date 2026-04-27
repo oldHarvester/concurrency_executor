@@ -25,10 +25,11 @@ extension CancelTokenX on CancelToken {
   }
 }
 
-extension ConcurrencyExecutorFutureResultX<T> on Future<ConcurrencyExecutorResult<T>> {
+extension ConcurrencyExecutorFutureResultX<T>
+    on Future<ConcurrencyExecutorResult<T>> {
   Future<T> toFuture() async {
     final result = await this;
-    return result.toResultOrError();
+    return result.resultOrError();
   }
 }
 
@@ -199,7 +200,7 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
   /// Уникален в рамках одного executor'а.
   final int id;
 
-  T toResultOrError() {
+  T resultOrError() {
     return when(
       onComplete: (result) {
         return result.result.when(
