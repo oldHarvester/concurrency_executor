@@ -246,7 +246,6 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
   }) {
     return when(
       onComplete: (result) {
-        final completeResultValue = onComplete?.call(result);
         final operationResultValue = result.result.map(
           onSuccess: (result) {
             return onSuccessResult?.call(id, result);
@@ -255,6 +254,7 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
             return onErrorResult?.call(id, error, stackTrace);
           },
         );
+        final completeResultValue = onComplete?.call(result);
         return operationResultValue ?? completeResultValue;
       },
       onCancelled: (result) => onCancelled?.call(result),
@@ -890,8 +890,8 @@ class ConcurrencyExecutor<T> {
         // Сначала глобальные колбэки, потом локальные.
         // Каждый _notifyStart применяет фильтр notifyOnSharedResult
         // к своему уровню колбэков.
-        this.callbacks._notifyStart(item);
         localCallbacks._notifyStart(item);
+        this.callbacks._notifyStart(item);
       },
       onDone: (item) => _onExecutorDone(item),
     );
@@ -920,8 +920,8 @@ class ConcurrencyExecutor<T> {
     // shared-фильтр через _notifyResult.
     future.then(
       (result) {
-        this.callbacks._notifyResult(result: result, item: executorItem);
         localCallbacks._notifyResult(result: result, item: executorItem);
+        this.callbacks._notifyResult(result: result, item: executorItem);
       },
     );
     return future;
