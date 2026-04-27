@@ -85,6 +85,33 @@ typedef ConcurrencyExecutorHandler<T> = Future<T> Function(
   ConcurrencyExecutorItem handler,
 );
 
+typedef OnConcurrencyExecutorStart = void Function(int id);
+
+typedef OnConcurrencyExecutorComplete<T> = void Function(
+  int id,
+  ConcurrencyExecutorCompleteResult<T> result,
+  bool shared,
+);
+
+typedef OnConcurrencyExecutorCancelled<T> = void Function(
+  int id,
+  ConcurrencyExecutorCancelledResult<T> result,
+  bool shared,
+);
+
+typedef OnConcurrencyExecutorSuccessResult<T> = void Function(
+  int id,
+  T result,
+  bool shared,
+);
+
+typedef OnConcurrencyExecutorErrorResult = void Function(
+  int id,
+  Object error,
+  StackTrace stackTrace,
+  bool shared,
+);
+
 sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
   const ConcurrencyExecutorResult(this.id);
 
@@ -176,6 +203,66 @@ class ConcurrencyExecutorCompleteResult<T>
   List<Object?> get props => [...super.props, result];
 }
 
+class ConcurrencyExecutorCallbacks<T> {
+  const ConcurrencyExecutorCallbacks({
+    this.onStart,
+    this.onCancelled,
+    this.onComplete,
+    this.onErrorResult,
+    this.onSuccessResult,
+    this.notifyOnSharedResult = false,
+  });
+
+  final bool notifyOnSharedResult;
+  final OnConcurrencyExecutorStart? onStart;
+  final OnConcurrencyExecutorCancelled<T>? onCancelled;
+  final OnConcurrencyExecutorComplete<T>? onComplete;
+  final OnConcurrencyExecutorErrorResult? onErrorResult;
+  final OnConcurrencyExecutorSuccessResult<T>? onSuccessResult;
+
+  void _notify(
+      ConcurrencyExecutorItem<T> item, void Function(bool shared) callback) {
+    final shared = item.wasMarkedForReplacement;
+    if (notifyOnSharedResult || !shared) {
+      callback(shared);
+    }
+  }
+
+  void _notifyStart(ConcurrencyExecutorItem<T> item) {
+    _notify(
+      item,
+      (shared) {
+        onStart?.call(item.id);
+      },
+    );
+  }
+
+  void _notifyResult({
+    required ConcurrencyExecutorResult<T> result,
+    required ConcurrencyExecutorItem<T> item,
+  }) {
+    _notify(
+      item,
+      (shared) {
+        result.map(
+          onErrorResult: (id, error, stackTrace) {
+            onErrorResult?.call(id, error, stackTrace, shared);
+          },
+          onSuccessResult: (id, result) {
+            onSuccessResult?.call(id, result, shared);
+          },
+          onComplete: (result) {
+            onComplete?.call(result.id, result, shared);
+          },
+          onCancelled: (result) {
+            onCancelled?.call(result.id, result, shared);
+          },
+        );
+      },
+    );
+  }
+}
+
 class ConcurrencyExecutorItem<T> {
   ConcurrencyExecutorItem({
     required this.id,
@@ -205,9 +292,12 @@ class ConcurrencyExecutorItem<T> {
   final ConcurrencyExecutorHandler<T> _handler;
   bool _started = false;
   bool _awaitingReplacement = false;
+  bool _wasMarkedForReplacement = false;
 
   /// true когда item полностью завершён (complete или cancelled).
   bool get isCompleted => _completer.isCompleted;
+
+  bool get wasMarkedForReplacement => _wasMarkedForReplacement;
 
   /// true когда _start() был вызван и item ещё не завершён.
   ///
@@ -246,7 +336,9 @@ class ConcurrencyExecutorItem<T> {
   }
 
   void _markAsAwaitingReplacement() {
+    if (isCompleted) return;
     _awaitingReplacement = true;
+    _wasMarkedForReplacement = true;
     cancelToken.tryCancel();
   }
 
@@ -322,6 +414,7 @@ class ConcurrencyExecutor<T> {
   ConcurrencyExecutor({
     this.strategy = ConcurrencyExecutorStrategy.switchMap,
     this.shareWithOvertaken = true,
+    this.callbacks = const ConcurrencyExecutorCallbacks(),
   });
 
   /// Управляет поведением при конкурирующих вызовах.
@@ -348,12 +441,12 @@ class ConcurrencyExecutor<T> {
   /// - exhaustMap + shareWithOvertaken=false: новый вызов во время активного
   ///   сразу получает cancelled, текущая операция продолжается.
   final bool shareWithOvertaken;
-
   final ConcurrencyExecutorStrategy strategy;
-  final IntGenerator _idGenerator = IntGenerator();
   final SplayTreeMap<int, ConcurrencyExecutorItem<T>> _executorMap =
       SplayTreeMap();
   bool _disposed = false;
+  final ConcurrencyExecutorCallbacks<T> callbacks;
+  final IntGenerator _idGenerator = IntGenerator();
 
   bool get isProcessing {
     return _executorMap.isNotEmpty;
@@ -426,11 +519,8 @@ class ConcurrencyExecutor<T> {
 
   Future<ConcurrencyExecutorResult<T>> execute(
     ConcurrencyExecutorHandler<T> handler, {
-    void Function(int id)? onStart,
-    void Function(ConcurrencyExecutorCompleteResult<T> result)? onComplete,
-    void Function(ConcurrencyExecutorCancelledResult<T> result)? onCancelled,
-    void Function(int id, T result)? onSuccessResult,
-    void Function(int id, Object error, StackTrace stackTrace)? onErrorResult,
+    ConcurrencyExecutorCallbacks<T> callbacks =
+        const ConcurrencyExecutorCallbacks(),
   }) async {
     var needCancel = _disposed;
     var markAsWaiting = false;
@@ -464,7 +554,10 @@ class ConcurrencyExecutor<T> {
     final executorItem = ConcurrencyExecutorItem<T>(
       id: id,
       handler: handler,
-      onStart: (item) => onStart?.call(id),
+      onStart: (item) {
+        this.callbacks._notifyStart(item);
+        callbacks._notifyStart(item);
+      },
       onDone: (item) => _onExecutorDone(item),
     );
     if (markAsWaiting) {
@@ -482,17 +575,13 @@ class ConcurrencyExecutor<T> {
       }
       _executorMap[id] = executorItem;
     }
-
-    return executorItem.future
-      ..then(
-        (value) {
-          value.map(
-            onErrorResult: onErrorResult,
-            onSuccessResult: onSuccessResult,
-            onComplete: onComplete,
-            onCancelled: onCancelled,
-          );
-        },
-      );
+    final future = executorItem.future;
+    future.then(
+      (result) {
+        this.callbacks._notifyResult(result: result, item: executorItem);
+        callbacks._notifyResult(result: result, item: executorItem);
+      },
+    );
+    return future;
   }
 }

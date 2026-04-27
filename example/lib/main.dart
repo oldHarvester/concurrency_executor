@@ -154,21 +154,23 @@ class _ExamplePageState extends State<ExamplePage> {
                   (handler) async {
                     await Future.delayed(Duration(seconds: 3));
                   },
-                  onStart: (id) {
-                    logger.log('start $id');
-                  },
-                  onCancelled: (result) {
-                    logger.log('cancelled: ${result.id}');
-                  },
-                  onComplete: (result) {
-                    logger.log('complete: ${result.id}');
-                  },
-                  onSuccessResult: (id, result) {
-                    logger.log('success complete: $id');
-                  },
-                  onErrorResult: (id, error, stackTrace) {
-                    logger.log('error complete: $id');
-                  },
+                  callbacks: ConcurrencyExecutorCallbacks(
+                    onStart: (id) {
+                      logger.log('start $id');
+                    },
+                    onCancelled: (id, result, shared) {
+                      logger.log('cancelled: ${result.id}');
+                    },
+                    onComplete: (id, result, shared) {
+                      logger.log('complete: ${result.id}');
+                    },
+                    onSuccessResult: (id, result, shared) {
+                      logger.log('success complete: $id');
+                    },
+                    onErrorResult: (id, error, stackTrace, shared) {
+                      logger.log('error complete: $id');
+                    },
+                  ),
                 );
               }
 
