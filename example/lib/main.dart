@@ -159,7 +159,7 @@ class _ExamplePageState extends State<ExamplePage> {
                       logger.log('start $id');
                     },
                     onCancelled: (id, result, shared) {
-                      logger.log('cancelled: ${result.id}');
+                      logger.log('cancelled: ${result.id}, reason: ${result.reason.name}');
                     },
                     onComplete: (id, result, shared) {
                       logger.log('complete: ${result.id}');
@@ -169,6 +169,9 @@ class _ExamplePageState extends State<ExamplePage> {
                     },
                     onErrorResult: (id, error, stackTrace, shared) {
                       logger.log('error complete: $id');
+                    },
+                    onConcurrentCancel: (id, result, shared) {
+                      logger.log('concurrent cancel: $id');
                     },
                   ),
                 );

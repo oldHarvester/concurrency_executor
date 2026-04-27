@@ -25,6 +25,15 @@ extension CancelTokenX on CancelToken {
   }
 }
 
+enum ConcurrencyExecutorCancelReason {
+  concurrent,
+  disposed,
+  tokenCancelled,
+  stopped,
+  userCancelled,
+  ;
+}
+
 /// Стратегия обработки конкурирующих вызовов в [ConcurrencyExecutor].
 ///
 /// Названия и семантика заимствованы из RxDart/RxJS операторов того же
@@ -108,6 +117,8 @@ typedef ConcurrencyExecutorHandler<T> = Future<T> Function(
 /// Полезен для отображения индикаторов загрузки.
 typedef OnConcurrencyExecutorStart = void Function(int id);
 
+typedef OnConcurrencySkipped = void Function(int id);
+
 /// Колбэк завершения операции (success или error).
 ///
 /// Срабатывает ВМЕСТЕ с [OnConcurrencyExecutorSuccessResult] (для success)
@@ -145,6 +156,12 @@ typedef OnConcurrencyExecutorSuccessResult<T> = void Function(
   bool shared,
 );
 
+typedef OnConcurrencyExecutorConcurrentCancel<T> = void Function(
+  int id,
+  ConcurrencyExecutorCancelledResult<T> result,
+  bool shared,
+);
+
 /// Колбэк ошибки с распакованным error/stackTrace.
 ///
 /// Срабатывает ВМЕСТЕ с [OnConcurrencyExecutorComplete] — детальный
@@ -171,7 +188,8 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
   final int id;
 
   const factory ConcurrencyExecutorResult.cancelled(
-    int id, [
+    int id,
+    ConcurrencyExecutorCancelReason reason, [
     OperationResult<T>? result,
   ]) = ConcurrencyExecutorCancelledResult;
 
@@ -254,12 +272,16 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
 /// замещающий вызов с cancelled результатом.
 class ConcurrencyExecutorCancelledResult<T>
     extends ConcurrencyExecutorResult<T> {
-  const ConcurrencyExecutorCancelledResult(super.id, [this.result]);
+  const ConcurrencyExecutorCancelledResult(super.id, this.reason,
+      [this.result]);
 
   final OperationResult<T>? result;
+  final ConcurrencyExecutorCancelReason reason;
+
+  bool get isConcurrent => reason == ConcurrencyExecutorCancelReason.concurrent;
 
   @override
-  List<Object?> get props => [...super.props, result];
+  List<Object?> get props => [...super.props, reason, result];
 }
 
 /// Результат завершённого вызова — содержит OperationResult с success или error.
@@ -306,6 +328,7 @@ class ConcurrencyExecutorCallbacks<T> {
     this.onComplete,
     this.onErrorResult,
     this.onSuccessResult,
+    this.onConcurrentCancel,
     this.notifyOnSharedResult = false,
   });
 
@@ -355,6 +378,8 @@ class ConcurrencyExecutorCallbacks<T> {
   /// с [onComplete]. Подчиняется [notifyOnSharedResult].
   final OnConcurrencyExecutorSuccessResult<T>? onSuccessResult;
 
+  final OnConcurrencyExecutorConcurrentCancel<T>? onConcurrentCancel;
+
   /// Универсальный guard для всех уведомлений: пропускает callback только
   /// если результат не shared, либо если notifyOnSharedResult=true.
   /// Единая точка контроля для onStart и всех result-колбэков.
@@ -400,6 +425,9 @@ class ConcurrencyExecutorCallbacks<T> {
           },
           onCancelled: (result) {
             onCancelled?.call(result.id, result, shared);
+            if (result.isConcurrent) {
+              onConcurrentCancel?.call(result.id, result, shared);
+            }
           },
         );
       },
@@ -439,7 +467,7 @@ class ConcurrencyExecutorItem<T> {
     this.cancelToken.whenCancel.then(
       (value) {
         if (!awaitingReplacement) {
-          cancel();
+          _cancel(ConcurrencyExecutorCancelReason.tokenCancelled);
         }
       },
     );
@@ -576,14 +604,18 @@ class ConcurrencyExecutorItem<T> {
   ///
   /// Сбрасывает _awaitingReplacement — отменённый item больше не ждёт
   /// чужой результат.
-  void cancel() {
+  void _cancel(ConcurrencyExecutorCancelReason reason) {
     if (isCompleted || isCancelled) {
       return;
     }
     _awaitingReplacement = false;
     cancelToken.tryCancel();
-    _completer.complete(ConcurrencyExecutorResult.cancelled(id));
+    _completer.complete(ConcurrencyExecutorResult.cancelled(id, reason));
     _onDone?.call(this);
+  }
+
+  void cancel() {
+    return _cancel(ConcurrencyExecutorCancelReason.userCancelled);
   }
 }
 
@@ -684,31 +716,54 @@ class ConcurrencyExecutor<T> {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
-    cancelAll();
+    _disposeCancelAll();
+  }
+
+  // ignore: unused_element
+  void _concurrentCancelById(int id) {
+    return _cancel(
+      id: id,
+      reason: ConcurrencyExecutorCancelReason.concurrent,
+    );
+  }
+
+  void _disposeCancelAll() {
+    return _cancel(reason: ConcurrencyExecutorCancelReason.disposed);
+  }
+
+  void _concurrentCancelAll() {
+    return _cancel(
+      reason: ConcurrencyExecutorCancelReason.concurrent,
+    );
   }
 
   /// Отменяет все активные операции одновременно.
   /// Каждый item получит cancelled-результат, сетевые запросы Dio
   /// прервутся через CancelToken.
   void cancelAll() {
-    return _cancel();
+    return _cancel(
+      reason: ConcurrencyExecutorCancelReason.userCancelled,
+    );
   }
 
   /// Отменяет конкретную операцию по id (выданному в execute()).
   void cancelById(int id) {
-    return _cancel(id: id);
+    return _cancel(
+      id: id,
+      reason: ConcurrencyExecutorCancelReason.userCancelled,
+    );
   }
 
-  void _cancel({int? id}) {
+  void _cancel({int? id, required ConcurrencyExecutorCancelReason reason}) {
     if (id != null) {
-      _executorMap[id]?.cancel();
+      _executorMap[id]?._cancel(reason);
     } else {
       // Снимок списка — необходим, потому что cancel() триггерит _onDone,
       // который удаляет item из _executorMap, и мы не можем
       // итерировать по изменяющейся коллекции.
       final items = _executorMap.values.toList();
       for (final item in items) {
-        item.cancel();
+        item._cancel(reason);
       }
     }
   }
@@ -759,7 +814,7 @@ class ConcurrencyExecutor<T> {
                 item._complete(result.result);
               },
               onCancelled: (result) {
-                item.cancel();
+                item._cancel(result.reason);
               },
             );
           }
@@ -787,7 +842,8 @@ class ConcurrencyExecutor<T> {
     ConcurrencyExecutorCallbacks<T>? callbacks,
   }) async {
     final localCallbacks = callbacks ?? ConcurrencyExecutorCallbacks<T>();
-    var needCancel = _disposed;
+    var initialCancelReason =
+        _disposed ? ConcurrencyExecutorCancelReason.disposed : null;
     var markAsWaiting = false;
     switch (strategy) {
       case ConcurrencyExecutorStrategy.concatMap:
@@ -807,7 +863,7 @@ class ConcurrencyExecutor<T> {
           if (isProcessing) {
             // Без sharing — дублирующий вызов сразу cancelled,
             // активная операция продолжается без изменений.
-            needCancel = true;
+            initialCancelReason ??= ConcurrencyExecutorCancelReason.concurrent;
           }
         }
         break;
@@ -821,7 +877,7 @@ class ConcurrencyExecutor<T> {
           }
         } else {
           // Без sharing — предыдущие сразу получают cancelled.
-          cancelAll();
+          _concurrentCancelAll();
         }
         break;
     }
@@ -846,10 +902,11 @@ class ConcurrencyExecutor<T> {
         strategy == ConcurrencyExecutorStrategy.concatMap && isProcessing;
     final skip = skipConcat;
     final autoStart = !skip;
-    if (needCancel) {
+
+    if (initialCancelReason != null) {
       // Для disposed executor или exhaust+!sharing — item сразу cancelled
       // и НЕ попадает в _executorMap. Future уже завершён cancelled.
-      executorItem.cancel();
+      executorItem._cancel(initialCancelReason);
     } else {
       if (autoStart) {
         executorItem._start();
