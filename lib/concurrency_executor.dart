@@ -25,6 +25,13 @@ extension CancelTokenX on CancelToken {
   }
 }
 
+extension ConcurrencyExecutorFutureResultX<T> on Future<ConcurrencyExecutorResult<T>> {
+  Future<T> toFuture() async {
+    final result = await this;
+    return result.toResultOrError();
+  }
+}
+
 enum ConcurrencyExecutorCancelReason {
   concurrent,
   disposed,
@@ -173,6 +180,11 @@ typedef OnConcurrencyExecutorErrorResult = void Function(
   bool shared,
 );
 
+class ConcurrencyExecutorException implements Exception {
+  const ConcurrencyExecutorException({required this.result});
+  final ConcurrencyExecutorCancelledResult result;
+}
+
 /// Результат вызова [ConcurrencyExecutor.execute].
 ///
 /// Sealed-иерархия из двух состояний:
@@ -186,6 +198,24 @@ sealed class ConcurrencyExecutorResult<T> with EquatableMixin {
   /// Идентификатор вызова, выданный [ConcurrencyExecutor] в execute().
   /// Уникален в рамках одного executor'а.
   final int id;
+
+  T toResultOrError() {
+    return when(
+      onComplete: (result) {
+        return result.result.when(
+          onSuccess: (result) {
+            return result;
+          },
+          onError: (error, stackTrace) {
+            throw error;
+          },
+        );
+      },
+      onCancelled: (result) {
+        throw ConcurrencyExecutorException(result: result);
+      },
+    );
+  }
 
   const factory ConcurrencyExecutorResult.cancelled(
     int id,
