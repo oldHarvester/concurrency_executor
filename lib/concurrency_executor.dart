@@ -5,6 +5,8 @@ import 'package:dio/dio.dart';
 import 'package:equatable/equatable.dart';
 import 'package:flutter_toolkit/flutter_toolkit.dart';
 
+part 'polling_executor.dart';
+
 /// Расширение [CancelToken] для безопасной отмены без проверок и try/catch.
 ///
 /// Стандартный `cancel()` принтит в консоль ошибку при повторном вызове.
@@ -115,7 +117,7 @@ enum ConcurrencyExecutorStrategy {
 /// типа T. Брошенные исключения перехватываются через safeExecute()
 /// и оборачиваются в OperationResult.error.
 typedef ConcurrencyExecutorHandler<T> = Future<T> Function(
-  ConcurrencyExecutorItem handler,
+  ConcurrencyExecutorItem<T> handler,
 );
 
 /// Колбэк "операция стартовала".
@@ -733,6 +735,10 @@ class ConcurrencyExecutor<T> {
 
   final IntGenerator _idGenerator = IntGenerator();
 
+  int _completeTasks = 0;
+
+  int get completeTask => _completeTasks;
+
   /// true когда есть хотя бы одна активная операция в пуле.
   /// Активные = всё что в _executorMap (выполняющиеся, awaiting, в очереди).
   bool get isProcessing {
@@ -820,7 +826,10 @@ class ConcurrencyExecutor<T> {
   /// дольше всех).
   void _onExecutorDone(ConcurrencyExecutorItem<T> executor) {
     final id = executor.id;
-    _executorMap.remove(id);
+    final item = _executorMap.remove(id);
+    if (item != null) {
+      _completeTasks++;
+    }
     if (_executorMap.isNotEmpty) {
       if (strategy == ConcurrencyExecutorStrategy.concatMap) {
         final next = _executorMap.entries.first.value;
