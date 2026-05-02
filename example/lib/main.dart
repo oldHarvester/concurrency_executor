@@ -1,6 +1,7 @@
-import 'package:concurrency_executor/concurrency_executor.dart';
+import 'package:example/polling_example.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_toolkit/flutter_toolkit.dart';
+
+import 'example_page.dart';
 
 void main() {
   runApp(MyApp());
@@ -15,212 +16,39 @@ class MyApp extends StatelessWidget {
       home: Builder(
         builder: (context) {
           return Scaffold(
-            body: Center(
-              child: ElevatedButton(
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) {
-                        return ExamplePage();
-                      },
-                    ),
-                  );
-                },
-                child: Text('Open'),
+            body: SizedBox.expand(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  ElevatedButton(
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (context) {
+                            return ExamplePage();
+                          },
+                        ),
+                      );
+                    },
+                    child: Text('Open Concurrency example'),
+                  ),
+                  ElevatedButton(
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (context) {
+                            return PollingExample();
+                          },
+                        ),
+                      );
+                    },
+                    child: Text('Open PollingExecutor example'),
+                  ),
+                ],
               ),
             ),
           );
         },
-      ),
-    );
-  }
-}
-
-class ExamplePage extends StatefulWidget {
-  const ExamplePage({super.key});
-
-  @override
-  State<ExamplePage> createState() => _ExamplePageState();
-}
-
-class _ExamplePageState extends State<ExamplePage> {
-  bool _shareWithOvertaken = false;
-
-  late Map<ConcurrencyExecutorStrategy, ConcurrencyExecutor> _executorMap =
-      _buildMap();
-
-  Map<ConcurrencyExecutorStrategy, ConcurrencyExecutor> _buildMap() =>
-      Map.fromEntries(
-        ConcurrencyExecutorStrategy.values.map(
-          (strategy) {
-            return MapEntry(
-              strategy,
-              ConcurrencyExecutor(
-                strategy: strategy,
-                shareWithOvertaken: _shareWithOvertaken,
-              ),
-            );
-          },
-        ),
-      );
-
-  void _disposeExecutors() {
-    for (final entry in _executorMap.values) {
-      entry.dispose();
-    }
-  }
-
-  @override
-  void dispose() {
-    _disposeExecutors();
-    super.dispose();
-  }
-
-  Widget buildStrategyTitle(ConcurrencyExecutorStrategy strategy) {
-    return Text(
-      strategy.name,
-      textAlign: TextAlign.center,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: TextStyle(
-        fontWeight: FontWeight.w600,
-      ),
-    );
-  }
-
-  Widget buildButton({
-    required String title,
-    VoidCallback? onPressed,
-  }) {
-    return ElevatedButton(
-      onPressed: onPressed,
-      child: Text(title),
-    );
-  }
-
-  Widget buildStrategyDescription(ConcurrencyExecutorStrategy strategy) {
-    return Text(
-      switch (strategy) {
-        ConcurrencyExecutorStrategy.switchMap =>
-          'Отменяет предыдущий запрос и запускает новый',
-        ConcurrencyExecutorStrategy.exhaustMap =>
-          'Игнорирует новые запросы пока выполняется текущий',
-        ConcurrencyExecutorStrategy.mergeMap =>
-          'Выполняет все запросы параллельно, не отменяя предыдущие',
-        ConcurrencyExecutorStrategy.concatMap =>
-          'Выполняет запросы по очереди, ждёт завершения предыдущего',
-      },
-      textAlign: TextAlign.center,
-      maxLines: 2,
-      overflow: TextOverflow.ellipsis,
-      style: TextStyle(
-        fontSize: 8,
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Switch(
-            value: _shareWithOvertaken,
-            onChanged: (value) {
-              setState(
-                () {
-                  _shareWithOvertaken = value;
-                  _disposeExecutors();
-                  _executorMap = _buildMap();
-                },
-              );
-            },
-          ),
-          GridView.builder(
-            physics: NeverScrollableScrollPhysics(),
-            shrinkWrap: true,
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 2,
-            ),
-            itemCount: _executorMap.length,
-            itemBuilder: (context, index) {
-              final executorEntry = _executorMap.entries.elementAt(index);
-              final executor = executorEntry.value;
-              final strategy = executor.strategy;
-              final logger = CustomLogger(owner: strategy.name);
-              void execute() async {
-                executor.execute(
-                  (handler) async {
-                    await Future.delayed(Duration(seconds: 3));
-                  },
-                  callbacks: ConcurrencyExecutorCallbacks(
-                    onStart: (id) {
-                      logger.log('start $id');
-                    },
-                    onCancelled: (id, result, shared) {
-                      logger.log('cancelled: ${result.id}, reason: ${result.reason.name}');
-                    },
-                    onComplete: (id, result, shared) {
-                      logger.log('complete: ${result.id}');
-                    },
-                    onSuccessResult: (id, result, shared) {
-                      logger.log('success complete: $id');
-                    },
-                    onErrorResult: (id, error, stackTrace, shared) {
-                      logger.log('error complete: $id');
-                    },
-                    onConcurrentCancel: (id, result, shared) {
-                      logger.log('concurrent cancel: $id');
-                    },
-                  ),
-                );
-              }
-
-              return Container(
-                padding: EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  border: Border.all(),
-                ),
-                child: Column(
-                  children: [
-                    buildStrategyTitle(strategy),
-                    buildStrategyDescription(strategy),
-                    Expanded(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Flexible(
-                            child: buildButton(
-                              title: 'Try out',
-                              onPressed: () {
-                                for (var i = 0; i < 3; i++) {
-                                  Future.delayed(
-                                    Duration(seconds: i),
-                                    execute,
-                                  );
-                                }
-                              },
-                            ),
-                          ),
-                          Flexible(
-                            child: buildButton(
-                              title: 'Cancel all',
-                              onPressed: () {
-                                executor.cancelAll();
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ],
       ),
     );
   }

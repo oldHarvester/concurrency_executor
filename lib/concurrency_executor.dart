@@ -336,7 +336,7 @@ class ConcurrencyExecutorCompleteResult<T>
 /// - Локально через параметр [ConcurrencyExecutor.execute] — срабатывает
 ///   только для конкретного вызова (UI-логика, side effects экрана)
 ///
-/// При наличии обоих уровней порядок вызова: сначала глобальные, потом локальные.
+/// При наличии обоих уровней порядок вызова: сначала локальные, потом глобальные.
 ///
 /// **Семантика onComplete vs onSuccessResult/onErrorResult:**
 /// onComplete — общее уведомление о завершении.
@@ -604,10 +604,10 @@ class ConcurrencyExecutorItem<T> {
   void _complete(OperationResult<T> result) {
     if (!isCompleted) {
       _awaitingReplacement = false;
+      _onDone?.call(this); // Must be before complete
       _completer.complete(
         ConcurrencyExecutorResult.complete(id, result),
       );
-      _onDone?.call(this);
     }
   }
 
@@ -643,8 +643,8 @@ class ConcurrencyExecutorItem<T> {
     }
     _awaitingReplacement = false;
     cancelToken.tryCancel();
+    _onDone?.call(this); // Must be before complete
     _completer.complete(ConcurrencyExecutorResult.cancelled(id, reason));
-    _onDone?.call(this);
   }
 
   void cancel() {
@@ -927,7 +927,7 @@ class ConcurrencyExecutor<T> {
       id: id,
       handler: handler,
       onStart: (item) {
-        // Сначала глобальные колбэки, потом локальные.
+        // Сначала локальные колбэки, потом глобальные.
         // Каждый _notifyStart применяет фильтр notifyOnSharedResult
         // к своему уровню колбэков.
         localCallbacks._notifyStart(item);
@@ -942,7 +942,6 @@ class ConcurrencyExecutor<T> {
         strategy == ConcurrencyExecutorStrategy.concatMap && isProcessing;
     final skip = skipConcat;
     final autoStart = !skip;
-
     if (initialCancelReason != null) {
       // Для disposed executor или exhaust+!sharing — item сразу cancelled
       // и НЕ попадает в _executorMap. Future уже завершён cancelled.
@@ -956,7 +955,7 @@ class ConcurrencyExecutor<T> {
     }
     final future = executorItem.future;
     // Уведомление о результате после резолва Future.
-    // Порядок: глобальные → локальные. Каждый уровень сам применяет
+    // Порядок: локальные → глобальные. Каждый уровень сам применяет
     // shared-фильтр через _notifyResult.
     future.then(
       (result) {
