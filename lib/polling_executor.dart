@@ -1,5 +1,16 @@
 part of 'concurrency_executor.dart';
 
+typedef PollingExecutorContinueHandler<T> = bool Function(
+  OperationResult<T> result,
+  int attempts,
+);
+
+typedef PollingExecutorCompleteHandler<T> = void Function(
+  OperationResult<T> result,
+);
+
+typedef PollingExecutorCancelHandler = void Function();
+
 /// Repeatedly executes an async operation until a stop condition is met.
 ///
 /// On each iteration [onResult] is called with the latest result and the
@@ -10,26 +21,8 @@ part of 'concurrency_executor.dart';
 /// retry counter, so the executor can be safely reused.
 class PollingExecutor<T> {
   PollingExecutor({
-    this.restartDuration = Duration.zero,
-    required this.onResult,
-    this.onComplete,
-    this.onCancel,
     this.debug = false,
   });
-
-  /// Called after each successful operation.
-  ///
-  /// Return `true` to schedule another attempt, `false` to stop polling.
-  final bool Function(OperationResult<T> result, int attempts) onResult;
-
-  /// Called once when polling finishes successfully (i.e. [onResult] returned `false`).
-  final void Function(OperationResult<T> result)? onComplete;
-
-  /// Called when the execution is cancelled via [cancel] or a new [execute] call.
-  final void Function()? onCancel;
-
-  /// Delay between retries. Defaults to [Duration.zero] (no delay).
-  final Duration restartDuration;
 
   final ConcurrencyExecutor<T> _executor = ConcurrencyExecutor(
     strategy: ConcurrencyExecutorStrategy.exhaustMap,
@@ -86,23 +79,28 @@ class PollingExecutor<T> {
   Future<OperationResult<T>> execute(
     Future<T> Function(
       ConcurrencyExecutorItem<T> item,
-    ) handler,
-  ) async {
+    ) handler, {
+    required PollingExecutorContinueHandler<T> willContinue,
+    PollingExecutorCancelHandler? onCancel,
+    PollingExecutorCompleteHandler<T>? onComplete,
+    Duration restartDuration = const Duration(seconds: 1),
+  }) async {
     cancel();
     final completer = FlexibleCompleter<OperationResult<T>>();
     _completer = completer;
 
-    void onCancel() {
+    void cancelHandler() {
       completer.cancel(
         OperationResult.failed(
           error: const FlexibleCompleterException(
-              FlexibleCompleterExceptionType.cancelled),
+            FlexibleCompleterExceptionType.cancelled,
+          ),
           stackTrace: StackTrace.current,
           elapsedTime: Duration.zero,
         ),
       );
       _logger.log('cancelled');
-      this.onCancel?.call();
+      onCancel?.call();
     }
 
     /// «Цикл retry: пока onResult просит continue (true)
@@ -113,7 +111,7 @@ class PollingExecutor<T> {
         if (retries > 0) {
           final completed = await _timer.oneTickStart(restartDuration);
           if (!completed) {
-            onCancel();
+            cancelHandler();
             continue;
           }
         }
@@ -125,7 +123,7 @@ class PollingExecutor<T> {
           );
           result.when(
             onComplete: (result) {
-              final retry = onResult.call(result.result, _retries);
+              final retry = willContinue.call(result.result, _retries);
               if (retry) {
                 _retries++;
                 _logger.log('on retry result: ${result.result}');
@@ -136,12 +134,12 @@ class PollingExecutor<T> {
               }
             },
             onCancelled: (result) {
-              onCancel();
+              cancelHandler();
             },
           );
         }
       } catch (e) {
-        onCancel();
+        cancelHandler();
         rethrow;
       }
     }

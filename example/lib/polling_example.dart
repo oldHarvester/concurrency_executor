@@ -12,11 +12,7 @@ class PollingExample extends StatefulWidget {
 
 class _PollingExampleState extends State<PollingExample> {
   late final PollingExecutor<int> _executor = PollingExecutor(
-    restartDuration: Duration(seconds: 1),
     debug: true,
-    onResult: (result, attempts) {
-      return attempts < 3;
-    },
   );
 
   @override
@@ -35,6 +31,7 @@ class _PollingExampleState extends State<PollingExample> {
             ElevatedButton(
               onPressed: () {
                 _executor.execute(
+                  willContinue: (result, attempts) => attempts < 3,
                   (item) async {
                     await Future.delayed(Duration(milliseconds: 400));
                     return Random().nextInt(100);
