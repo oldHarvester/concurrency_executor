@@ -1,11 +1,88 @@
+// ignore_for_file: public_member_api_docs, sort_constructors_first
 part of 'concurrency_executor.dart';
+
+class PollingExecutorTimeSpent with EquatableMixin {
+  const PollingExecutorTimeSpent({
+    this.total = Duration.zero,
+    this.totalEffective = Duration.zero,
+    this.lastEffective = Duration.zero,
+    this.last = Duration.zero,
+  });
+
+  const PollingExecutorTimeSpent.zero()
+      : total = Duration.zero,
+        totalEffective = Duration.zero,
+        lastEffective = Duration.zero,
+        last = Duration.zero;
+
+  /// Total spent time with `restartDuration`
+  final Duration total;
+
+  /// Total without `restartDuration`
+  final Duration totalEffective;
+
+  final Duration lastEffective;
+
+  final Duration last;
+
+  @override
+  List<Object?> get props => [total, totalEffective, lastEffective, last];
+
+  PollingExecutorTimeSpent copyWith({
+    Duration? total,
+    Duration? totalEffective,
+    Duration? lastEffective,
+    Duration? last,
+  }) {
+    return PollingExecutorTimeSpent(
+      total: total ?? this.total,
+      totalEffective: totalEffective ?? this.totalEffective,
+      lastEffective: lastEffective ?? this.lastEffective,
+      last: last ?? this.last,
+    );
+  }
+}
+
+class PollingExecutorRecords with EquatableMixin {
+  const PollingExecutorRecords({
+    this.errorAttempts = 0,
+    this.successAttempts = 0,
+    this.spentTime = const PollingExecutorTimeSpent.zero(),
+  });
+
+  const PollingExecutorRecords.zero()
+      : successAttempts = 0,
+        errorAttempts = 0,
+        spentTime = const PollingExecutorTimeSpent.zero();
+
+  PollingExecutorRecords copyWith({
+    int? errorAttempts,
+    int? successAttempts,
+    PollingExecutorTimeSpent? spentTime,
+  }) {
+    return PollingExecutorRecords(
+      errorAttempts: errorAttempts ?? this.errorAttempts,
+      successAttempts: successAttempts ?? this.successAttempts,
+      spentTime: spentTime ?? this.spentTime,
+    );
+  }
+
+  final int successAttempts;
+  final int errorAttempts;
+  final PollingExecutorTimeSpent spentTime;
+
+  int get attempts => successAttempts + errorAttempts;
+
+  @override
+  List<Object?> get props => [successAttempts, errorAttempts, spentTime];
+}
 
 /// Called after each attempt to decide whether polling should continue.
 ///
 /// Return `true` to schedule another attempt, `false` to stop and resolve the future.
 typedef PollingExecutorContinueHandler<T> = bool Function(
   OperationResult<T> result,
-  int attempts,
+  PollingExecutorRecords records,
 );
 
 /// Called once when the polling session finishes (success or error).
@@ -80,16 +157,16 @@ class PollingExecutor<T> {
   }
 
   /// Number of retries performed in the current polling session.
-  int get retries => _retries;
+  PollingExecutorRecords get records => _records;
 
-  int _retries = 0;
+  PollingExecutorRecords _records = PollingExecutorRecords.zero();
 
   /// Cancels any in-flight operation and releases internal resources.
   ///
   /// Call this when the executor is no longer needed (e.g. in `dispose` of a
   /// widget or bloc). After [dispose] the executor must not be used again.
   void dispose() {
-    _retries = 0;
+    _records = PollingExecutorRecords.zero();
     _timer.stop();
     _executor.dispose();
     _streamController?.close();
@@ -100,7 +177,7 @@ class PollingExecutor<T> {
   /// Resets [retries] to `0` and stops the inter-attempt timer. The executor
   /// can be reused afterwards by calling [execute] again.
   void cancel() {
-    _retries = 0;
+    _records = PollingExecutorRecords.zero();
     _timer.stop();
     _executor.cancelAll();
     _streamController?.close();
@@ -128,6 +205,27 @@ class PollingExecutor<T> {
       onSuccessComplete: onSuccessComplete,
       restartDuration: restartDuration,
     ).safeExecute();
+  }
+
+  void _updateRecords(
+    Stopwatch watcher,
+    Duration restartDuration,
+    OperationResult<T> result,
+    bool wasWaiting,
+  ) {
+    final spentTime = _records.spentTime;
+    final lastEffective = watcher.elapsed;
+    final last = lastEffective + (wasWaiting ? restartDuration : Duration.zero);
+    _records = _records.copyWith(
+      errorAttempts: result.isSuccess ? null : _records.errorAttempts + 1,
+      successAttempts: result.isFailed ? null : _records.successAttempts + 1,
+      spentTime: spentTime.copyWith(
+        lastEffective: lastEffective,
+        last: last,
+        total: spentTime.total + last,
+        totalEffective: spentTime.totalEffective + lastEffective,
+      ),
+    );
   }
 
   /// Starts a new polling session by running [handler] repeatedly.
@@ -162,7 +260,8 @@ class PollingExecutor<T> {
 
     while (!completer.isCompleted) {
       try {
-        if (retries > 0) {
+        final wait = records.attempts > 0 && restartDuration > Duration.zero;
+        if (wait) {
           final completed = await _timer.oneTickStart(restartDuration);
           if (!completed) {
             cancelHandler();
@@ -170,16 +269,24 @@ class PollingExecutor<T> {
           }
         }
         if (!completer.isCompleted) {
+          final Stopwatch watcher = Stopwatch();
           final result = await _executor.execute(
             (item) async {
               return handler(item);
             },
           );
+          watcher.stop();
           result.when(
             onComplete: (result) {
-              final retry = willContinue.call(result.result, _retries);
+              final operationResult = result.result;
+              _updateRecords(
+                watcher,
+                restartDuration,
+                operationResult,
+                wait,
+              );
+              final retry = willContinue.call(result.result, records);
               if (retry) {
-                _retries++;
                 _logger.log('on retry result: ${result.result}');
               } else {
                 result.result.when(

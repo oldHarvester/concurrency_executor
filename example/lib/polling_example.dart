@@ -31,7 +31,7 @@ class _PollingExampleState extends State<PollingExample> {
             ElevatedButton(
               onPressed: () {
                 _executor.execute(
-                  willContinue: (result, attempts) => attempts < 3,
+                  willContinue: (result, records) => records.attempts < 3,
                   (item) async {
                     await Future.delayed(Duration(milliseconds: 400));
                     return Random().nextInt(100);
