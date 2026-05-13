@@ -687,7 +687,7 @@ class ConcurrencyExecutorItem<T> {
 class ConcurrencyExecutor<T> {
   ConcurrencyExecutor({
     this.strategy = ConcurrencyExecutorStrategy.switchMap,
-    this.shareWithOvertaken = true,
+    this.shareWithOvertaken = false,
     ConcurrencyExecutorCallbacks<T>? callbacks,
   }) : callbacks = callbacks ?? ConcurrencyExecutorCallbacks<T>();
 

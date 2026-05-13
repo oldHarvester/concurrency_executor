@@ -43,6 +43,7 @@ typedef PollingExecutorHandler<T> = Future<T> Function(
 class PollingExecutor<T> {
   PollingExecutor({
     this.debug = false,
+    this.shareResult = false,
   });
 
   final ConcurrencyExecutor<T> _executor = ConcurrencyExecutor(
@@ -50,6 +51,8 @@ class PollingExecutor<T> {
   );
 
   final bool debug;
+
+  final bool shareResult;
 
   final FlexibleTimer _timer = FlexibleTimer(debug: false);
 
@@ -129,8 +132,17 @@ class PollingExecutor<T> {
     PollingExecutorErrorComplete? onErrorComplete,
     PollingExecutorCancelHandler? onCancel,
     Duration restartDuration = const Duration(seconds: 1),
+    bool? shareResult,
   }) async {
-    cancel();
+    final resultShare = shareResult ?? this.shareResult;
+    if (resultShare) {
+      final oldCompleter = _completer;
+      if (oldCompleter != null && !oldCompleter.isCompleted) {
+        return oldCompleter.future;
+      }
+    } else {
+      cancel();
+    }
     final completer = FlexibleCompleter<T>();
     _completer = completer;
 
