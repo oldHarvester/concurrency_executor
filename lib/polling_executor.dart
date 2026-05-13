@@ -269,7 +269,7 @@ class PollingExecutor<T> {
           }
         }
         if (!completer.isCompleted) {
-          final Stopwatch watcher = Stopwatch();
+          final Stopwatch watcher = Stopwatch()..start();
           final result = await _executor.execute(
             (item) async {
               return handler(item);
