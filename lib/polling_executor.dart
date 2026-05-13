@@ -43,7 +43,6 @@ typedef PollingExecutorHandler<T> = Future<T> Function(
 class PollingExecutor<T> {
   PollingExecutor({
     this.debug = false,
-    this.shareResult = false,
   });
 
   final ConcurrencyExecutor<T> _executor = ConcurrencyExecutor(
@@ -51,8 +50,6 @@ class PollingExecutor<T> {
   );
 
   final bool debug;
-
-  final bool shareResult;
 
   final FlexibleTimer _timer = FlexibleTimer(debug: false);
 
@@ -63,6 +60,24 @@ class PollingExecutor<T> {
 
   // ignore: unused_field
   FlexibleCompleter<T>? _completer;
+
+  StreamController<T>? _streamController;
+
+  Stream<T>? get streamProcess {
+    final controller = _streamController;
+    if (controller != null && !controller.isClosed) {
+      return controller.stream;
+    }
+    return null;
+  }
+
+  Future<T>? get process {
+    final completer = _completer;
+    if (completer != null && !completer.isCompleted) {
+      return completer.future;
+    }
+    return null;
+  }
 
   /// Number of retries performed in the current polling session.
   int get retries => _retries;
@@ -77,6 +92,7 @@ class PollingExecutor<T> {
     _retries = 0;
     _timer.stop();
     _executor.dispose();
+    _streamController?.close();
   }
 
   /// Cancels the current polling session without disposing the executor.
@@ -87,6 +103,7 @@ class PollingExecutor<T> {
     _retries = 0;
     _timer.stop();
     _executor.cancelAll();
+    _streamController?.close();
   }
 
   /// Like [execute], but catches errors and cancellations instead of throwing.
@@ -132,17 +149,8 @@ class PollingExecutor<T> {
     PollingExecutorErrorComplete? onErrorComplete,
     PollingExecutorCancelHandler? onCancel,
     Duration restartDuration = const Duration(seconds: 1),
-    bool? shareResult,
   }) async {
-    final resultShare = shareResult ?? this.shareResult;
-    if (resultShare) {
-      final oldCompleter = _completer;
-      if (oldCompleter != null && !oldCompleter.isCompleted) {
-        return oldCompleter.future;
-      }
-    } else {
-      cancel();
-    }
+    cancel();
     final completer = FlexibleCompleter<T>();
     _completer = completer;
 
@@ -200,5 +208,50 @@ class PollingExecutor<T> {
     }
 
     return completer.future;
+  }
+
+  Stream<T> streamExecute(
+    PollingExecutorHandler<T> handler, {
+    required PollingExecutorContinueHandler<T> willContinue,
+    PollingExecutorCompleteHandler<T>? onComplete,
+    PollingExecutorSuccessComplete<T>? onSuccessComplete,
+    PollingExecutorErrorComplete? onErrorComplete,
+    PollingExecutorCancelHandler? onCancel,
+    Duration restartDuration = const Duration(seconds: 1),
+  }) {
+    final streamController = StreamController<T>.broadcast();
+    execute(
+      handler,
+      willContinue: (result, attempts) {
+        result.when(
+          onError: (error, stackTrace) {
+            streamController.addError(error, stackTrace);
+          },
+          onSuccess: (result) {
+            streamController.add(result);
+          },
+        );
+        return willContinue(result, attempts);
+      },
+      onCancel: () {
+        streamController.addError(
+          FlexibleCompleterException(
+            FlexibleCompleterExceptionType.cancelled,
+          ),
+        );
+        onCancel?.call();
+      },
+      onComplete: onComplete,
+      onErrorComplete: onErrorComplete,
+      onSuccessComplete: onSuccessComplete,
+      restartDuration: restartDuration,
+    ).then(
+      (value) {
+        streamController.close();
+      },
+    );
+    _streamController = streamController;
+
+    return streamController.stream;
   }
 }
